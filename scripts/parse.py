@@ -1,11 +1,12 @@
 # parse.py
-import shutil
 import xml.etree.ElementTree as ET
 from datetime import datetime
-from pathlib import Path
 
 import pandas as pd
-from scripts.config import BRONZE_PATH, SILVER_PATH
+from botocore.exceptions import ClientError
+
+from scripts.config import BRONZE_PREFIX, SILVER_PATH, SILVER_PREFIX
+from scripts.storage import delete_prefix, list_files, read_bytes
 from scripts.utils import find_text, to_bool
 
 
@@ -14,21 +15,23 @@ def parse():
     all_transactions = []
     skipped = []
 
-    for i in Path(BRONZE_PATH).rglob("*.txt"):
-        filing_date = datetime.strptime(i.parent.name.split("=")[1], "%Y%m%d").strftime(
+    for i in list_files(BRONZE_PREFIX):
+        if not i.endswith(".txt"):
+            continue
+        s = i.split("/")
+        filing_date = datetime.strptime(s[-2].split("=")[1], "%Y%m%d").strftime(
             "%Y-%m-%d"
         )
-        accession = i.stem
+        accession = s[-1].removesuffix(".txt")
         try:
-            with open(i, encoding="utf-8", errors="replace") as file:
-                raw = file.read()
+            raw = read_bytes(i).decode("utf-8", errors="replace")
             xml_start = raw.find("<XML>")
             xml_end = raw.find("</XML>")
             if xml_start == -1 or xml_end == -1:
                 skipped.append((accession, "no <XML> block"))
                 continue
             root = ET.fromstring(raw[xml_start + 5 : xml_end].strip())
-        except (ET.ParseError, OSError) as e:
+        except (ET.ParseError, OSError, ClientError) as e:
             skipped.append((accession, str(e)))
             continue
 
@@ -129,10 +132,10 @@ def parse():
     print(f"parsed {len(df)} rows from {df['accession'].nunique()} filings, writing...")
 
     # wipe silver so re-runs rebuild rather than append
-    shutil.rmtree(SILVER_PATH, ignore_errors=True)
+    delete_prefix(SILVER_PREFIX)
     df.to_parquet(SILVER_PATH, partition_cols=["filing_date"], index=False)
 
-    print(f"write done to {SILVER_PATH}")
+    print(f"write done to {SILVER_PREFIX}")
     if skipped:
         print(f"{len(skipped)} files skipped:")
         for acc, reason in skipped:

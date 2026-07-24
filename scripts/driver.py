@@ -1,25 +1,39 @@
 # driver.py
+import math
 import urllib.error
 from datetime import datetime, timedelta
 
 from scripts.fetch import discover
 from scripts.ingest import ingest
 from scripts.parse import parse
+from scripts.tests import validate
+from scripts.utils import get
 
-start_date = datetime(2026, 7, 6)
-end_date = datetime(2026, 7, 12)
+start_date = datetime(2026, 7, 1)
+end_date = datetime(2026, 7, 23)
 
 for i in range((end_date - start_date).days + 1):
     current_date = start_date + timedelta(days=i)
     if current_date.weekday() >= 5:
-        print(f'{current_date.strftime("%Y-%m-%d")}: weekend, no data')
+        print(f"{current_date.strftime('%Y-%m-%d')}: weekend, no data")
         continue
     try:
         df = discover(current_date)
     except urllib.error.HTTPError as e:
-        if e.code == 404:
+        if e.code in (403, 404):
+            year = current_date.year
+            qtr = math.ceil(current_date.month / 3)
+            probe_url = (
+                f"https://www.sec.gov/Archives/edgar/daily-index/{year}/QTR{qtr}/"
+            )
+            try:
+                get(probe_url)
+            except urllib.error.HTTPError:
+                print(f"probe failed - likely blocked, stopping at {current_date}")
+                raise e
             print(f"no index for {current_date.strftime('%Y-%m-%d')}, skipping")
             continue
         raise
     ingest(df)
 parse()
+validate()

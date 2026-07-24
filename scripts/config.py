@@ -1,4 +1,9 @@
 # config.py
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
 
 HEADERS = {"User-Agent": "Sri dachepallisrimurari@gmail.com"}
 
@@ -11,5 +16,15 @@ SLEEP = 0.2
 
 COLS = ["cik", "company", "form_type", "date_filed", "filename"]
 
-BRONZE_PATH = "data/bronze/form4"
-SILVER_PATH = "data/silver/form4"
+
+LOCAL_ROOT = "data"
+
+USE_S3 = os.getenv("USE_S3", "false").lower() == "true"
+
+S3_BUCKET = os.getenv("S3_BUCKET", "edgar-form4-sri")
+BRONZE_PREFIX = "bronze/form4"
+SILVER_PREFIX = "silver/form4"
+
+SILVER_PATH = (
+    f"s3://{S3_BUCKET}/{SILVER_PREFIX}" if USE_S3 else f"{LOCAL_ROOT}/{SILVER_PREFIX}"
+)
