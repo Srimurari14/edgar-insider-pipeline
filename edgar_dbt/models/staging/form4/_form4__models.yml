@@ -1,0 +1,21 @@
+models:
+  - name: stg_form4_transactions
+    description: "No natural uniqueness key exists at transaction grain; Form 4 XML carries no execution-level identifier, so same-day same-price-tier round-lot trades are legitimately indistinguishable"
+    columns:
+      - name: accession
+        tests:
+          - not_null
+      - name: filing_date
+        tests:
+          - not_null
+      - name: issuer_cik
+        tests:
+          - not_null
+      - name: owner_cik
+        tests:
+          - not_null
+      - name: ownership_type
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['D', 'I']

@@ -1,0 +1,58 @@
+models:
+  - name: fct_transactions
+    description: "One row per transaction, transaction grain (matches staging). Adds transaction_classification (Buy/Sell/Merger Disposition/Other, derived from transaction_code), dollar_value (transaction_shares * transaction_price_per_share), and is_debt_security (flags non-equity instruments like notes/bonds filed via Form 4 — exclude these when summing dollar_value, don't filter them out of the table itself)."
+    columns:
+      - name: accession
+        tests:
+          - not_null
+      - name: issuer_cik
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_issuers')
+                field: issuer_cik
+      - name: owner_cik
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_owners')
+                field: owner_cik
+      - name: transaction_classification
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['Buy', 'Sell', 'Merger Disposition', 'Other']
+
+  - name: dim_issuers
+    description: "One row per issuer_cik. Where issuer_name or issuer_trading_symbol vary across filings for the same CIK (observed: ticker typos, one genuine company rename), most recent filing wins."
+    columns:
+      - name: issuer_cik
+        tests:
+          - unique
+          - not_null
+
+  - name: dim_owners
+    description: "One row per owner_cik, most recent filing's name wins. Checked for name-normalized collisions across distinct owner_cik values (whitespace/punctuation/case normalized); none found in current data. Fuzzy or nickname matching deliberately out of scope — risk of false-positive merges outweighs benefit at this data volume."
+    columns:
+      - name: owner_cik
+        tests:
+          - unique
+          - not_null
+
+  - name: agg_owner_activity
+    description: "One row per owner_cik. Buy/sell dollar totals and counts, excluding debt securities. Joined from fct_transactions and dim_owners."
+    columns:
+      - name: owner_cik
+        tests:
+          - unique
+          - not_null
+
+  - name: agg_issuer_activity
+    description: "One row per issuer_cik. Buy/sell dollar totals and counts, excluding debt securities, plus distinct owner count. Joined from fct_transactions and dim_issuers."
+    columns:
+      - name: issuer_cik
+        tests:
+          - unique
+          - not_null

@@ -1,0 +1,6 @@
+sources:
+  - name: silver_form4
+    database: awsdatacatalog
+    schema: edgar_form4
+    tables:
+      - name: silver_form4_transactions
