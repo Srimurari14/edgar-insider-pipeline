@@ -1,0 +1,45 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "S3Access",
+            "Effect": "Allow",
+            "Action": ["s3:PutObject", "s3:GetObject", "s3:ListBucket", "s3:GetBucketLocation", "s3:DeleteObject"],
+            "Resource": ["arn:aws:s3:::edgar-form4-sri", "arn:aws:s3:::edgar-form4-sri/*"]
+        },
+        {
+            "Sid": "AthenaQueryAccess",
+            "Effect": "Allow",
+            "Action": ["athena:StartQueryExecution", "athena:GetQueryExecution", "athena:GetQueryResults", "athena:StopQueryExecution", "athena:GetWorkGroup", "athena:GetDataCatalog"],
+            "Resource": "*"
+        },
+        {
+            "Sid": "GlueCatalogAccess",
+            "Effect": "Allow",
+            "Action": ["glue:GetDatabase", "glue:GetDatabases", "glue:GetTable", "glue:GetTables", "glue:CreateTable", "glue:UpdateTable", "glue:DeleteTable", "glue:GetPartition", "glue:GetPartitions", "glue:BatchGetPartition", "glue:CreatePartition", "glue:UpdatePartition", "glue:DeletePartition", "glue:BatchCreatePartition", "glue:BatchDeletePartition", "glue:GetTableVersion", "glue:GetTableVersions"],
+            "Resource": "*"
+        },
+        {
+            "Sid": "CloudWatchLogsAccess",
+            "Effect": "Allow",
+            "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+            "Resource": "arn:aws:logs:us-east-1:221082190990:log-group:/aws/codebuild/*"
+        },
+        {
+            "Sid": "ECRPullAccess",
+            "Effect": "Allow",
+            "Action": [
+                "ecr:GetDownloadUrlForLayer",
+                "ecr:BatchGetImage",
+                "ecr:BatchCheckLayerAvailability"
+            ],
+            "Resource": "arn:aws:ecr:us-east-1:221082190990:repository/edgar-dbt"
+        },
+        {
+            "Sid": "ECRAuthToken",
+            "Effect": "Allow",
+            "Action": "ecr:GetAuthorizationToken",
+            "Resource": "*"
+        }
+    ]
+}

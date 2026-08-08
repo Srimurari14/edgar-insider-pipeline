@@ -1,0 +1,12 @@
+FROM python:3.13
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y gcc
+
+COPY requirements-dbt.txt .
+RUN pip install --no-cache-dir -r requirements-dbt.txt
+
+COPY profiles.yml /root/.dbt/profiles.yml
+
+COPY edgar_dbt/ edgar_dbt/

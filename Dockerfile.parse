@@ -1,0 +1,10 @@
+FROM public.ecr.aws/lambda/python:3.13
+WORKDIR ${LAMBDA_TASK_ROOT}
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY scripts/ ${LAMBDA_TASK_ROOT}/scripts/
+COPY lambda_handlers/parse_handler.py ${LAMBDA_TASK_ROOT}/lambda_handlers/
+
+CMD ["lambda_handlers.parse_handler.handler"]

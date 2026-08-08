@@ -4,7 +4,7 @@ import os
 import time
 
 import pandas as pd
-from scripts.config import COLS, DAILY_INDEX_URL, SLEEP
+from scripts.config import COLS, DAILY_INDEX_URL, SLEEP, USE_S3
 from scripts.utils import get
 
 
@@ -29,8 +29,9 @@ def discover(dte):
     print(f"{dt_str}: {len(form4_rows)} Form 4 filings")
     df = pd.DataFrame(form4_rows, columns=COLS)
 
-    os.makedirs("data/discovery", exist_ok=True)
-    out = f"data/discovery/{dt_str}.csv"
-    df.to_csv(out, header=True, index=False)
-    print(f"data saved to {out}")
+    if not USE_S3:
+        os.makedirs("data/discovery", exist_ok=True)
+        out = f"data/discovery/{dt_str}.csv"
+        df.to_csv(out, header=True, index=False)
+        print(f"data saved to {out}")
     return df

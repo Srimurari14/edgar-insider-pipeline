@@ -6,14 +6,28 @@ import pandas as pd
 from botocore.exceptions import ClientError
 
 from scripts.config import BRONZE_PREFIX, SILVER_PATH, SILVER_PREFIX
-from scripts.storage import delete_prefix, list_files, read_bytes
+from scripts.storage import list_files, read_bytes
 from scripts.utils import find_text, to_bool
 
 
 def parse():
     print("Parsing Data ...")
+
+    existing_silver_files = [
+        k for k in list_files(SILVER_PREFIX) if k.endswith(".parquet")
+    ]
+    if existing_silver_files:
+        existing_accessions = set(
+            pd.read_parquet(SILVER_PATH, columns=["accession"])["accession"].unique()
+        )
+        print(f"{len(existing_accessions)} accessions already in silver")
+    else:
+        existing_accessions = set()
+        print("no existing silver data found, parsing all bronze files")
+
     all_transactions = []
     skipped = []
+    already_processed = 0
 
     for i in list_files(BRONZE_PREFIX):
         if not i.endswith(".txt"):
@@ -23,6 +37,11 @@ def parse():
             "%Y-%m-%d"
         )
         accession = s[-1].removesuffix(".txt")
+
+        if accession in existing_accessions:
+            already_processed += 1
+            continue
+
         try:
             raw = read_bytes(i).decode("utf-8", errors="replace")
             xml_start = raw.find("<XML>")
@@ -115,6 +134,18 @@ def parse():
                     }
                 )
 
+    if not all_transactions:
+        print(
+            f"no new filings to parse ({already_processed} already in silver, "
+            f"{len(skipped)} skipped)"
+        )
+        return {
+            "new_rows": 0,
+            "new_filings": 0,
+            "already_processed": already_processed,
+            "skipped": len(skipped),
+        }
+
     df = pd.DataFrame(all_transactions)
 
     numeric_cols = [
@@ -129,14 +160,20 @@ def parse():
     )
     df[date_cols] = df[date_cols].apply(pd.to_datetime, errors="coerce")
 
-    print(f"parsed {len(df)} rows from {df['accession'].nunique()} filings, writing...")
+    print(f"parsed {len(df)} new rows from {df['accession'].nunique()} filings, writing...")
 
-    # wipe silver so re-runs rebuild rather than append
-    delete_prefix(SILVER_PREFIX)
     df.to_parquet(SILVER_PATH, partition_cols=["filing_date"], index=False)
 
     print(f"write done to {SILVER_PREFIX}")
+    print(f"{already_processed} filings already in silver, skipped")
     if skipped:
         print(f"{len(skipped)} files skipped:")
         for acc, reason in skipped:
             print(f"  {acc}: {reason}")
+
+    return {
+        "new_rows": len(df),
+        "new_filings": df["accession"].nunique(),
+        "already_processed": already_processed,
+        "skipped": len(skipped),
+    }
