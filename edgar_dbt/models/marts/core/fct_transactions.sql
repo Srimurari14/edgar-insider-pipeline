@@ -32,8 +32,18 @@ SELECT
     END AS transaction_classification,
     transaction_shares * transaction_price_per_share as dollar_value,
     CASE 
-    WHEN security_title LIKE '%Notes%' OR security_title LIKE '%Bond%' 
-         OR security_title LIKE '%Debenture%' OR REGEXP_LIKE(security_title, '[0-9]+\.[0-9]+%')
-    THEN true ELSE false
-    END AS is_debt_security
+        WHEN security_title LIKE '%Notes%' OR security_title LIKE '%Bond%' 
+            OR security_title LIKE '%Debenture%' OR REGEXP_LIKE(security_title, '[0-9]+\.[0-9]+%')
+        THEN true ELSE false
+    END AS is_debt_security,
+    CASE 
+        WHEN transaction_code = 'J' THEN true 
+        ELSE false 
+    END AS is_nonstandard_pricing,
+    CASE 
+        WHEN security_title LIKE '%Notes%' OR security_title LIKE '%Bond%' 
+            OR security_title LIKE '%Debenture%' OR REGEXP_LIKE(security_title, '[0-9]+\.[0-9]+%')
+            OR transaction_code = 'J'
+        THEN true ELSE false
+    END AS dollar_value_unreliable
 FROM {{ref('stg_form4_transactions')}}
