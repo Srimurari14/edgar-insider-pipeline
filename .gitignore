@@ -9,3 +9,5 @@ bcb.py
 .DS_Store
 logs/
 profiles.yml
+response.json
+run.py

@@ -2,12 +2,16 @@
 
 import time
 import boto3
+import os
 
 DATABASE = "edgar_form4"
 OUTPUT_LOCATION = "s3://edgar-form4-sri/athena-query-results/"
 MAX_WAIT_SECONDS = 60  # give up if a query takes longer than this
 
 def get_athena_client():
+    if os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
+        return boto3.client("athena", region_name="us-east-1")
+
     sts = boto3.client("sts")
     assumed = sts.assume_role(
         RoleArn="arn:aws:iam::221082190990:role/edgar-agent-role",
