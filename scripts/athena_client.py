@@ -7,10 +7,32 @@ DATABASE = "edgar_form4"
 OUTPUT_LOCATION = "s3://edgar-form4-sri/athena-query-results/"
 MAX_WAIT_SECONDS = 60  # give up if a query takes longer than this
 
-client = boto3.client("athena", region_name="us-east-1")
+def get_athena_client():
+    sts = boto3.client("sts")
+    assumed = sts.assume_role(
+        RoleArn="arn:aws:iam::221082190990:role/edgar-agent-role",
+        RoleSessionName="edgar-agent-session",
+    )
+    creds = assumed["Credentials"]
+    return boto3.client(
+        "athena",
+        region_name="us-east-1",
+        aws_access_key_id=creds["AccessKeyId"],
+        aws_secret_access_key=creds["SecretAccessKey"],
+        aws_session_token=creds["SessionToken"],
+    )
 
+def is_read_only(sql: str) -> bool:
+    """Rejects anything that isn't a plain SELECT, before it reaches Athena."""
+    stripped = sql.strip().upper()
+    return stripped.startswith("SELECT") or stripped.startswith("WITH")
 
 def run_query(sql: str) -> dict:
+    if not is_read_only(sql):
+        return {"success": False, "error": "Only SELECT queries are allowed. This query was rejected before execution."}
+
+    client = get_athena_client()
+
     try:
         response = client.start_query_execution(
             QueryString=sql,

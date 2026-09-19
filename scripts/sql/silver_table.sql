@@ -1,5 +1,5 @@
 CREATE EXTERNAL TABLE edgar_form4.silver_form4_transactions ( accession string,
-                                                             period_of_repor timestamp,
+                                                             period_of_report timestamp,
                                                              document_type string,
                                                              issuer_cik string, 
                                                              issuer_name string, 
