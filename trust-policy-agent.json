@@ -4,7 +4,10 @@
         {
             "Effect": "Allow",
             "Principal": {
-                "AWS": "arn:aws:iam::221082190990:user/srimurari"
+                "AWS": [
+                    "arn:aws:iam::221082190990:user/srimurari",
+                    "arn:aws:iam::221082190990:user/edgar-pipeline"
+                ]
             },
             "Action": "sts:AssumeRole"
         }
