@@ -10,10 +10,14 @@ from scripts.athena_client import run_query
 from scripts.bronze_fetch import fetch_raw_filing
 from scripts.schema import SCHEMA_DESCRIPTION
 
-MODEL = "openai/gpt-oss-120b"
+MODEL = "openai/gpt-oss-20b"
 MAX_ITERATIONS = 4
 
 client = Groq(api_key=os.environ["GROQ_API_KEY"])
+
+FALLBACK_ANSWER = (
+    "I could not put together an answer to that one. Try a narrower question."
+)
 
 # The model ignores character-level formatting rules often enough that these are
 # fixed in code instead. This runs locally and costs nothing against the token budget.
@@ -184,6 +188,7 @@ exploratory ones.
 {SCHEMA_DESCRIPTION}
 
 When you have enough information, give your final answer and stop calling tools.
+Always write out your answer in words. Never end your turn without text.
 
 {FORMATTING_RULES}
 """
@@ -194,6 +199,22 @@ using only what you have already found. Do not call any tools.
 {HONESTY_RULES}
 
 {FORMATTING_RULES}"""
+
+
+def force_final_answer(messages: list) -> str:
+    """Asks the model for prose with tools switched off, and returns it."""
+    messages.append({"role": "user", "content": FINAL_ANSWER_NUDGE})
+
+    final = client.chat.completions.create(
+        model=MODEL,
+        messages=messages,
+        tool_choice="none",
+    )
+
+    answer = sanitize(final.choices[0].message.content)
+    if answer and answer.strip():
+        return answer
+    return FALLBACK_ANSWER
 
 
 def ask(question: str) -> str:
@@ -208,13 +229,21 @@ def ask(question: str) -> str:
             messages=messages,
             tools=TOOLS,
             tool_choice="auto",
-            reasoning_effort="low",
         )
 
         message = response.choices[0].message
 
         if not message.tool_calls:
-            return sanitize(message.content)  # model is done, this is the final answer
+            answer = sanitize(message.content)
+            if answer and answer.strip():
+                return answer  # model is done, this is the final answer
+
+            # The model stopped without calling a tool AND without saying
+            # anything. Returning here would hand the user a blank reply, so
+            # push it once more for prose instead.
+            print("\n[warn] model returned no tool calls and no text, retrying\n")
+            messages.append({"role": "assistant", "content": message.content or ""})
+            return force_final_answer(messages)
 
         # The assistant's own message (with its tool_calls) must be added
         # to history BEFORE the tool results, or the next API call fails.
@@ -267,17 +296,7 @@ def ask(question: str) -> str:
     # Out of steps. Rather than discarding everything gathered, make one final
     # call with tools switched off, forcing a prose answer from what we have.
     print("\n[final] step limit reached, forcing an answer from what was found\n")
-    messages.append({"role": "user", "content": FINAL_ANSWER_NUDGE})
-
-    final = client.chat.completions.create(
-        model=MODEL,
-        messages=messages,
-        tool_choice="none",
-    )
-
-    return sanitize(final.choices[0].message.content) or (
-        "I could not put together an answer to that one. Try a narrower question."
-    )
+    return force_final_answer(messages)
 
 
 if __name__ == "__main__":
