@@ -2,6 +2,10 @@ import json
 import re
 from scripts.athena_client import run_query
 from scripts.bronze_fetch import fetch_raw_filing, extract_explanation
+from scripts.storage import read_bytes
+
+JOB_PREFIX = "jobs/"
+JOB_ID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
 def handler(event, context):
@@ -17,6 +21,17 @@ def handler(event, context):
         data = get_issuers(params.get("search"))
     elif path == "/large-company-activity":
         data = get_large_company_activity()
+    elif path == "/chat-status":
+        params = event.get("queryStringParameters") or {}
+        status_code, data = get_chat_status(params.get("id"))
+        return {
+            "statusCode": status_code,
+            "headers": {
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "*"
+            },
+            "body": json.dumps(data)
+        }
     else:
         return {
             "statusCode": 404,
@@ -32,6 +47,43 @@ def handler(event, context):
         },
         "body": json.dumps(data)
     }
+
+
+def get_chat_status(job_id):
+    """Reads one chat job record out of S3. Returns (status_code, body)."""
+    if not job_id or not JOB_ID_PATTERN.match(job_id):
+        return 400, {"error": "Missing or malformed job id"}
+
+    try:
+        raw = read_bytes(f"{JOB_PREFIX}{job_id}.json")
+    except Exception as e:
+        # Most likely the key does not exist yet, or never will.
+        print(f"[chat-status] could not read job {job_id}: {e}")
+        return 404, {"status": "unknown", "error": "No such job"}
+
+    try:
+        record = json.loads(raw.decode("utf-8"))
+    except Exception as e:
+        print(f"[chat-status] job {job_id} is not valid json: {e}")
+        return 500, {"status": "error", "error": "Job record unreadable"}
+
+    status = record.get("status", "pending")
+
+    if status == "done":
+        return 200, {
+            "status": "done",
+            "question": record.get("question"),
+            "answer": record.get("answer"),
+        }
+
+    if status == "error":
+        # The real exception stays in the logs, not in the browser.
+        return 200, {
+            "status": "error",
+            "question": record.get("question"),
+        }
+
+    return 200, {"status": "pending", "question": record.get("question")}
 
 
 def get_top_trades(date_param=None):

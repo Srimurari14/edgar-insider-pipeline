@@ -597,6 +597,10 @@
   });
 
   const CHAT_URL = BASE_URL + "/chat";
+  const CHAT_STATUS_URL = BASE_URL + "/chat-status";
+  const POLL_INTERVAL_MS = 2000;
+  const POLL_MAX_ATTEMPTS = 90;
+
   let chatStarted = false;
 
   function escapeHtml(str) {
@@ -642,34 +646,67 @@
     const thinkingEl = appendChatMessage("assistant", "Thinking...");
     thinkingEl.classList.add("chat-thinking");
 
+    function finish() {
+      input.disabled = false;
+      btn.disabled = false;
+      input.focus();
+    }
+
+    function showError() {
+      thinkingEl.classList.remove("chat-thinking");
+      thinkingEl.classList.add("chat-error-msg");
+      thinkingEl.textContent = "That question took too long or something went wrong. ";
+
+      const retryBtn = document.createElement("button");
+      retryBtn.textContent = "Retry";
+      retryBtn.className = "chat-retry-btn";
+      retryBtn.addEventListener("click", () => {
+        thinkingEl.remove();
+        sendChatQuestion(question, true);
+      });
+      thinkingEl.appendChild(retryBtn);
+      finish();
+    }
+
+    function poll(jobId, attempt) {
+      if (attempt >= POLL_MAX_ATTEMPTS) {
+        showError();
+        return;
+      }
+
+      fetch(CHAT_STATUS_URL + "?id=" + encodeURIComponent(jobId))
+        .then(r => {
+          if (!r.ok) throw new Error("status " + r.status);
+          return r.json();
+        })
+        .then(data => {
+          if (data.status === "done") {
+            thinkingEl.classList.remove("chat-thinking");
+            thinkingEl.innerHTML = renderChatText(data.answer);
+            finish();
+          } else if (data.status === "error") {
+            showError();
+          } else {
+            // Still running. Show a dot per 10 seconds waited so the user can
+            // see it has not stalled.
+            const dots = ".".repeat(1 + Math.floor((attempt * POLL_INTERVAL_MS) / 10000));
+            thinkingEl.textContent = "Thinking" + dots;
+            setTimeout(() => poll(jobId, attempt + 1), POLL_INTERVAL_MS);
+          }
+        })
+        .catch(() => showError());
+    }
+
     fetch(CHAT_URL + "?q=" + encodeURIComponent(question))
       .then(r => {
         if (!r.ok) throw new Error("status " + r.status);
         return r.json();
       })
       .then(data => {
-        thinkingEl.classList.remove("chat-thinking");
-        thinkingEl.innerHTML = renderChatText(data.answer);
+        if (!data.job_id) throw new Error("no job id returned");
+        poll(data.job_id, 0);
       })
-      .catch(err => {
-        thinkingEl.classList.remove("chat-thinking");
-        thinkingEl.classList.add("chat-error-msg");
-        thinkingEl.textContent = "That question took too long or something went wrong. ";
-
-        const retryBtn = document.createElement("button");
-        retryBtn.textContent = "Retry";
-        retryBtn.className = "chat-retry-btn";
-        retryBtn.addEventListener("click", () => {
-          thinkingEl.remove();
-          sendChatQuestion(question, true);
-        });
-        thinkingEl.appendChild(retryBtn);
-      })
-      .finally(() => {
-        input.disabled = false;
-        btn.disabled = false;
-        input.focus();
-      });
+      .catch(() => showError());
   }
 
   document.getElementById("chat-form").addEventListener("submit", (e) => {

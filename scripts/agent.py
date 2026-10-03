@@ -4,11 +4,13 @@ import json
 import os
 import re
 
-from groq import Groq
+from groq import Groq, BadRequestError
 
 from scripts.athena_client import run_query
 from scripts.bronze_fetch import fetch_raw_filing
 from scripts.schema import SCHEMA_DESCRIPTION
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 MODEL = "openai/gpt-oss-20b"
 MAX_ITERATIONS = 4
@@ -18,6 +20,26 @@ client = Groq(api_key=os.environ["GROQ_API_KEY"])
 FALLBACK_ANSWER = (
     "I could not put together an answer to that one. Try a narrower question."
 )
+
+# Smaller models sometimes emit malformed JSON in a tool call. Groq rejects it
+# with a 400 before it ever reaches us, and the model is sampling, so simply
+# asking again usually produces valid JSON.
+TOOL_CALL_RETRIES = 3
+
+
+def call_model(**kwargs):
+    """Calls Groq, retrying when the model emits an unparseable tool call."""
+    last_error = None
+    for attempt in range(TOOL_CALL_RETRIES):
+        try:
+            return client.chat.completions.create(model=MODEL, **kwargs)
+        except BadRequestError as e:
+            if "tool_use_failed" not in str(e):
+                raise  # a real bad request, not a malformed tool call
+            last_error = e
+            print(f"[retry] malformed tool call from model, attempt {attempt + 1}")
+    raise last_error
+
 
 # The model ignores character-level formatting rules often enough that these are
 # fixed in code instead. This runs locally and costs nothing against the token budget.
@@ -58,6 +80,8 @@ def sanitize(text: str) -> str:
     # Collapse runs of spaces left behind by the replacements above. Line breaks
     # are untouched, so paragraph structure survives.
     text = re.sub(r" {2,}", " ", text)
+    text = re.sub(r"(?<=\d) (?=\d{3}\b)", ",", text)
+    text = text.replace("`", "")
 
     return text
 
@@ -205,8 +229,7 @@ def force_final_answer(messages: list) -> str:
     """Asks the model for prose with tools switched off, and returns it."""
     messages.append({"role": "user", "content": FINAL_ANSWER_NUDGE})
 
-    final = client.chat.completions.create(
-        model=MODEL,
+    final = call_model(
         messages=messages,
         tool_choice="none",
     )
@@ -218,14 +241,22 @@ def force_final_answer(messages: list) -> str:
 
 
 def ask(question: str) -> str:
+
+    today = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {
+            "role": "system",
+            "content": SYSTEM_PROMPT
+            + f"\n\nToday's date is {today} (US Eastern). Use this for any question "
+            "about today, yesterday, this week, this month, or recent activity. "
+            "Never guess at the current date.",
+        },
         {"role": "user", "content": question},
     ]
 
     for step in range(MAX_ITERATIONS):
-        response = client.chat.completions.create(
-            model=MODEL,
+        response = call_model(
             messages=messages,
             tools=TOOLS,
             tool_choice="auto",
