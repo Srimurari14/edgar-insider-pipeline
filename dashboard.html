@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EDGAR Insider Ledger</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@400;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+  :root {
+    --bg: #12141A;
+    --panel: #1B1E26;
+    --text: #E8E6DE;
+    --text-dim: #9A978C;
+    --buy: #4C9A6B;
+    --sell: #C0553A;
+    --anomaly: #D9A441;
+    --rule: #33363F;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 1fr 380px;
+    min-height: 100vh;
+  }
+
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: 1fr; }
+    .chat-panel { border-left: none; border-top: 1px solid var(--rule); }
+  }
+
+  .content-col { min-width: 0; }
+
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 2rem 2rem 1.5rem;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  h1 {
+    font-family: 'Source Serif 4', serif;
+    font-weight: 600;
+    font-size: 1.6rem;
+    margin: 0;
+    letter-spacing: 0.01em;
+  }
+
+  .search-box input {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    color: var(--text);
+    font-family: 'IBM Plex Mono', monospace;
+    padding: 0.5rem 0.75rem;
+    width: 240px;
+  }
+
+  .search-box input:focus { outline: none; border-color: var(--text-dim); }
+
+  main { padding: 0 2rem 4rem; }
+
+  section { border-bottom: 1px solid var(--rule); padding: 2rem 0; }
+  section:last-child { border-bottom: none; }
+
+  h2 {
+    font-family: 'Source Serif 4', serif;
+    font-weight: 600;
+    font-size: 1.1rem;
+    margin: 0;
+  }
+
+  .section-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 1.25rem;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .date-nav {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    color: var(--text-dim);
+    font-size: 0.85rem;
+  }
+
+  .date-nav button {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    color: var(--text);
+    font-family: 'IBM Plex Mono', monospace;
+    padding: 0.3rem 0.6rem;
+    cursor: pointer;
+  }
+
+  .date-nav button:disabled {
+    color: var(--text-dim);
+    cursor: not-allowed;
+    opacity: 0.4;
+  }
+
+  .date-nav button:not(:disabled):hover { border-color: var(--text-dim); }
+
+  .date-nav input[type="date"] {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    color: var(--text);
+    font-family: 'IBM Plex Mono', monospace;
+    padding: 0.3rem 0.5rem;
+    font-size: 0.85rem;
+  }
+
+  .empty-note {
+    color: var(--text-dim);
+    font-style: italic;
+    grid-column: 1 / -1;
+  }
+
+  .data-range-note {
+    color: var(--text-dim);
+    font-size: 0.8em;
+    text-align: center;
+    padding: 1.5rem 0 0;
+  }
+
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; }
+  @media (max-width: 700px) { .two-col { grid-template-columns: 1fr; } }
+
+  .col-label { font-size: 0.75rem; color: var(--text-dim); margin-bottom: 0.5rem; }
+
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 0.4rem 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  td.value { text-align: right; white-space: nowrap; }
+  .buy .value { color: var(--buy); }
+  .sell .value { color: var(--sell); }
+
+  .issuer-name { display: block; }
+  .owner-name { display: block; color: var(--text-dim); font-size: 0.85em; }
+
+  .scroll-list {
+    max-height: 14rem;
+    overflow-y: auto;
+    border: 1px solid var(--rule);
+  }
+
+  .scroll-list::-webkit-scrollbar { width: 8px; }
+  .scroll-list::-webkit-scrollbar-track { background: var(--panel); }
+  .scroll-list::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 4px; }
+
+  .company-row {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.6rem 1rem;
+    border-bottom: 1px solid var(--rule);
+  }
+  .company-row:last-child { border-bottom: none; }
+  .company-row .rank { color: var(--text-dim); width: 1.5rem; flex-shrink: 0; }
+  .company-row .company-main { flex: 1; min-width: 0; }
+  .company-row .value {
+    text-align: right;
+    white-space: nowrap;
+    color: var(--text-dim);
+    font-size: 0.85em;
+  }
+
+  /* Anomalies: always visible section, grid of 3, per-card explanation toggle */
+  .summary-hint {
+    font-family: 'IBM Plex Mono', monospace;
+    font-weight: 400;
+    font-size: 0.8rem;
+    color: var(--text-dim);
+  }
+
+  .anomaly-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1rem;
+    margin-top: 1.5rem;
+  }
+
+  .anomaly-card details summary {
+    cursor: pointer;
+    font-size: 0.8em;
+    color: var(--text-dim);
+    list-style: none;
+  }
+
+  .anomaly-card details summary::-webkit-details-marker { display: none; }
+
+  .anomaly-card details summary::before {
+    content: "show explanation \25BE";
+  }
+
+  .anomaly-card details[open] summary::before {
+    content: "hide explanation \25B4";
+  }
+
+  .anomaly-card details[open] summary {
+    margin-bottom: 0.5rem;
+  }
+
+  @media (max-width: 900px) { .anomaly-grid { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 600px) { .anomaly-grid { grid-template-columns: 1fr; } }
+
+  .anomaly-card {
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--anomaly);
+    padding: 1rem;
+  }
+
+  .anomaly-head {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .anomaly-head .value { color: var(--anomaly); font-weight: 600; font-size: 1.05em; }
+  .anomaly-meta { color: var(--text-dim); font-size: 0.8em; margin-bottom: 0.5rem; }
+
+  .anomaly-note {
+    font-family: 'Source Serif 4', serif;
+    font-style: italic;
+    font-size: 0.9em;
+    border-left: 2px solid var(--rule);
+    padding-left: 0.6rem;
+  }
+
+  .chat-panel {
+    border-left: 1px solid var(--rule);
+    padding: 2rem 1.5rem;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .chat-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 1rem; }
+
+  .chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin: 0 0 1rem;
+    padding-right: 0.25rem;
+  }
+
+  .chat-messages::-webkit-scrollbar { width: 6px; }
+  .chat-messages::-webkit-scrollbar-track { background: var(--panel); }
+  .chat-messages::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 3px; }
+
+  .chat-msg {
+    font-size: 0.92rem;
+    line-height: 1.6;
+    padding: 0.75rem 0.9rem;
+    border: 1px solid var(--rule);
+  }
+
+  .chat-msg-user { background: var(--panel); color: var(--text); }
+  .chat-msg-assistant { background: transparent; border-left: 2px solid var(--anomaly); border-top: none; border-right: none; border-bottom: none; }
+  .chat-thinking { color: var(--text-dim); font-style: italic; }
+  .chat-error-msg { color: var(--sell); font-style: italic; }
+  .chat-empty-hint { color: var(--text-dim); font-size: 0.85rem; }
+
+  .chat-form { display: flex; gap: 0.5rem; }
+
+  .chat-form input {
+    flex: 1;
+    min-width: 0;
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    color: var(--text);
+    font-family: 'IBM Plex Mono', monospace;
+    padding: 0.6rem 0.7rem;
+    font-size: 0.9rem;
+  }
+
+  .chat-form input:focus { outline: none; border-color: var(--text-dim); }
+
+  .chat-form button {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    color: var(--text);
+    font-family: 'IBM Plex Mono', monospace;
+    padding: 0.5rem 0.75rem;
+    cursor: pointer;
+    font-size: 0.85rem;
+  }
+
+  .chat-form button:hover:not(:disabled) { border-color: var(--text-dim); }
+  .chat-form button:disabled, .chat-form input:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .soon-tag { border: 1px solid var(--rule); padding: 0.2rem 0.5rem; font-size: 0.7rem; color: var(--text-dim); }
+
+  .chat-placeholder { color: var(--text-dim); font-size: 0.85rem; }
+
+  .loading, .error { color: var(--text-dim); font-size: 0.9em; }
+  .error { color: var(--sell); }
+
+  #issuer-results table { display: none; }
+  #issuer-results table.visible { display: table; }
+</style>
+</head>
+<body>
+
+<div class="layout">
+  <div class="content-col">
+    <header>
+      <h1>EDGAR Insider Ledger</h1>
+      <div class="search-box">
+        <input type="text" id="issuer-search" placeholder="Search issuers...">
+      </div>
+    </header>
+
+    <main>
+
+      <section id="top-trades-section">
+        <div class="section-head">
+          <h2>Top trades</h2>
+          <div class="date-nav">
+            <button id="prev-date-btn">&larr; prior day</button>
+            <span id="current-date">loading...</span>
+            <button id="next-date-btn">next day &rarr;</button>
+            <button id="today-btn">today</button>
+            <input type="date" id="date-picker" min="2026-07-01">
+          </div>
+        </div>
+        <div class="two-col">
+          <div>
+            <div class="col-label">Buys</div>
+            <table id="buys-table"><tbody></tbody></table>
+          </div>
+          <div>
+            <div class="col-label">Sells</div>
+            <table id="sells-table"><tbody></tbody></table>
+          </div>
+        </div>
+      </section>
+
+      <section id="issuers-section">
+        <h2>Issuers</h2>
+        <div id="issuer-results">
+          <div class="loading">Search above to find a company.</div>
+          <div class="anomaly-grid" id="issuer-grid" style="display:none;"></div>
+        </div>
+      </section>
+
+      <section id="large-company-section">
+        <h2>Large companies <span class="col-label">Ranked by how many different insiders traded</span></h2>
+        <div class="scroll-list" id="large-company-list"></div>
+      </section>
+
+      <section id="anomalies-section">
+        <div class="section-head">
+          <h2>Flagged anomalies</h2>
+          <span class="summary-hint" id="anomaly-count-hint"></span>
+        </div>
+        <div class="anomaly-grid" id="anomalies-list"></div>
+      </section>
+
+      <p class="data-range-note">Filing data is available continuously from July 1, 2026 onward.</p>
+
+    </main>
+  </div>
+
+  <aside class="chat-panel">
+    <div class="chat-head">
+      <h2 style="font-size: 1rem; margin: 0;">Ask the ledger</h2>
+    </div>
+    <div class="chat-messages" id="chat-messages">
+      <div class="chat-empty-hint">Ask a question about any filing, company, or flagged transaction. Each question is answered on its own. The chat does not remember earlier questions yet.</div>
+    </div>
+    <form class="chat-form" id="chat-form">
+      <input type="text" id="chat-input" placeholder="Ask a question..." autocomplete="off">
+      <button type="submit" id="chat-send-btn">Ask</button>
+    </form>
+  </aside>
+</div>
+
+<script>
+  const BASE_URL = "https://h3oqu76s4e.execute-api.us-east-1.amazonaws.com";
+  let currentDate = null;
+
+  function fmtMoney(value) {
+    const n = parseFloat(value);
+    if (isNaN(n)) return value;
+    return "$" + n.toLocaleString("en-US", { maximumFractionDigits: 0 });
+  }
+
+  function fmtCompactMoney(value) {
+    const n = parseFloat(value);
+    if (isNaN(n)) return value;
+    if (Math.abs(n) >= 1e12) return "$" + (n / 1e12).toFixed(2) + "T";
+    if (Math.abs(n) >= 1e9) return "$" + (n / 1e9).toFixed(2) + "B";
+    if (Math.abs(n) >= 1e6) return "$" + (n / 1e6).toFixed(2) + "M";
+    return fmtMoney(value);
+  }
+
+  function fmtDate(dateStr) {
+    if (!dateStr) return "";
+    const [y, m, d] = dateStr.split("-");
+    const months = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+    return `${months[parseInt(m,10)-1]} ${parseInt(d,10)}, ${y}`;
+  }
+
+  function rowHTML(row, cls) {
+    return `<tr class="${cls}">
+      <td>
+        <span class="issuer-name">${row.issuer_name}</span>
+        <span class="owner-name">${row.owner_name}</span>
+      </td>
+      <td class="value">${fmtCompactMoney(row.dollar_value)}</td>
+    </tr>`;
+  }
+
+  function loadTopTrades(date) {
+    const url = date ? `${BASE_URL}/top-trades?date=${date}` : `${BASE_URL}/top-trades`;
+    document.getElementById("current-date").textContent = "loading...";
+
+    fetch(url)
+      .then(r => r.json())
+      .then(data => {
+        currentDate = data.date;
+        document.getElementById("current-date").textContent = fmtDate(data.date);
+        document.getElementById("date-picker").value = data.date || "";
+
+        if (data.buys.length === 0 && data.sells.length === 0) {
+          document.querySelector("#buys-table tbody").innerHTML = "";
+          document.querySelector("#sells-table tbody").innerHTML = "";
+          document.querySelector("#top-trades-section .two-col").insertAdjacentHTML(
+            "afterend",
+            `<div class="empty-note" id="no-trades-note">No trades recorded for this date.</div>`
+          );
+        } else {
+          const existingNote = document.getElementById("no-trades-note");
+          if (existingNote) existingNote.remove();
+          document.querySelector("#buys-table tbody").innerHTML =
+            data.buys.map(row => rowHTML(row, "buy")).join("");
+          document.querySelector("#sells-table tbody").innerHTML =
+            data.sells.map(row => rowHTML(row, "sell")).join("");
+        }
+
+        const prevBtn = document.getElementById("prev-date-btn");
+        const nextBtn = document.getElementById("next-date-btn");
+        prevBtn.disabled = !data.prev_date;
+        nextBtn.disabled = !data.next_date;
+        prevBtn.onclick = () => data.prev_date && loadTopTrades(data.prev_date);
+        nextBtn.onclick = () => data.next_date && loadTopTrades(data.next_date);
+      })
+      .catch(err => {
+        document.getElementById("current-date").textContent = "error";
+        document.querySelector("#top-trades-section").innerHTML +=
+          `<div class="error">Failed to load top trades: ${err}</div>`;
+      });
+  }
+
+  document.getElementById("today-btn").addEventListener("click", () => loadTopTrades());
+  document.getElementById("date-picker").addEventListener("change", (e) => {
+    if (e.target.value) loadTopTrades(e.target.value);
+  });
+
+  function anomalyReason(row) {
+    if (row.is_debt_security === "true" && row.is_nonstandard_pricing === "true") return "This is a bond, and the price shown is not a real trade price";
+    if (row.is_debt_security === "true") return "This is a bond, not a stock, so the price shown does not mean what it looks like";
+    if (row.is_nonstandard_pricing === "true") return "The price shown here is not a real market price";
+    return "This transaction was flagged as unusual";
+  }
+
+  function anomalyNote(explanation) {
+    let noteText = null;
+    if (explanation && explanation.remarks) {
+      noteText = explanation.remarks;
+    } else if (explanation) {
+      const keys = Object.keys(explanation.footnotes || {});
+      if (keys.length > 0) noteText = explanation.footnotes[keys[0]];
+    }
+    if (!noteText) {
+      return `<div class="anomaly-note" style="color: var(--text-dim); font-style: normal;">No explanatory remarks or footnotes found.</div>`;
+    }
+    return `<details><summary></summary><div class="anomaly-note">"${noteText}"</div></details>`;
+  }
+
+  function loadAnomalies() {
+    fetch(BASE_URL + "/anomalies")
+      .then(r => r.json())
+      .then(data => {
+        document.getElementById("anomaly-count-hint").textContent =
+          `${data.anomalies.length} flagged`;
+        document.getElementById("anomalies-list").innerHTML = data.anomalies.map(row => `
+          <div class="anomaly-card">
+            <div class="anomaly-head">
+              <span class="issuer-name">${row.issuer_name}</span>
+              <span class="value">${fmtCompactMoney(row.dollar_value)}</span>
+            </div>
+            <div class="anomaly-meta">Filed by ${row.owner_name} on ${row.filing_date}. ${anomalyReason(row)}.</div>
+            ${anomalyNote(row.explanation)}
+          </div>
+        `).join("");
+      })
+      .catch(err => {
+        document.getElementById("anomalies-list").innerHTML = `<div class="error">Failed to load anomalies: ${err}</div>`;
+      });
+  }
+
+  function loadLargeCompanyActivity() {
+    fetch(BASE_URL + "/large-company-activity")
+      .then(r => r.json())
+      .then(data => {
+        document.getElementById("large-company-list").innerHTML =
+          data.companies.map((row, i) => `
+            <div class="company-row">
+              <span class="rank">${i + 1}</span>
+              <div class="company-main">
+                <span class="issuer-name">${row.issuer_name}</span>
+                <span class="owner-name">${row.total_owner_count} different people traded this stock</span>
+              </div>
+              <span class="value">Bought ${fmtCompactMoney(row.total_buy_value)}. Sold ${fmtCompactMoney(row.total_sell_value)}.</span>
+            </div>
+          `).join("");
+      })
+      .catch(err => {
+        document.getElementById("large-company-list").innerHTML = `<div class="error">Failed to load large-company activity: ${err}</div>`;
+      });
+  }
+
+  function searchIssuers(term) {
+    const loadingEl = document.querySelector("#issuer-results .loading");
+    const gridEl = document.getElementById("issuer-grid");
+
+    if (!term) {
+      loadingEl.style.display = "block";
+      loadingEl.textContent = "Search above to find a company.";
+      gridEl.style.display = "none";
+      return;
+    }
+    loadingEl.textContent = "Searching...";
+    loadingEl.style.display = "block";
+    gridEl.style.display = "none";
+
+    fetch(BASE_URL + "/issuers?search=" + encodeURIComponent(term))
+      .then(r => r.json())
+      .then(data => {
+        if (data.issuers.length === 0) {
+          loadingEl.textContent = "No matching issuers found.";
+          gridEl.style.display = "none";
+          return;
+        }
+        loadingEl.style.display = "none";
+        gridEl.innerHTML = data.issuers.map(row => `
+          <div class="anomaly-card">
+            <div class="issuer-name">${row.issuer_name}</div>
+            <div class="owner-name">${row.issuer_trading_symbol} · CIK ${row.issuer_cik}</div>
+          </div>
+        `).join("");
+        gridEl.style.display = "grid";
+      })
+      .catch(err => {
+        loadingEl.textContent = "Search failed: " + err;
+      });
+  }
+
+  let searchTimeout;
+  document.getElementById("issuer-search").addEventListener("input", (e) => {
+    clearTimeout(searchTimeout);
+    const term = e.target.value.trim();
+    searchTimeout = setTimeout(() => searchIssuers(term), 400);
+  });
+
+  const CHAT_URL = BASE_URL + "/chat";
+  let chatStarted = false;
+
+  function escapeHtml(str) {
+    const div = document.createElement("div");
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  function renderChatText(str) {
+    const escaped = escapeHtml(str);
+    // Defensive: if the model still slips in single-asterisk bullets
+    // despite the prompt instruction, turn " * " into a real line break
+    // and bullet dot, so it stays readable either way.
+    const bulletsFixed = escaped.replace(/(^|\n)\s*\*\s+/g, "$1&bull; ");
+    // Bold, then real line breaks so paragraphs the model wrote actually show.
+    const bolded = bulletsFixed.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    return bolded.replace(/\n\n+/g, "<br><br>").replace(/\n/g, "<br>");
+  }
+
+  function appendChatMessage(role, text) {
+    const messagesEl = document.getElementById("chat-messages");
+    if (!chatStarted) {
+      messagesEl.innerHTML = "";
+      chatStarted = true;
+    }
+    const msgDiv = document.createElement("div");
+    msgDiv.className = "chat-msg chat-msg-" + role;
+    msgDiv.textContent = text;
+    messagesEl.appendChild(msgDiv);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    return msgDiv;
+  }
+
+  function sendChatQuestion(question) {
+    const input = document.getElementById("chat-input");
+    const btn = document.getElementById("chat-send-btn");
+    input.disabled = true;
+    btn.disabled = true;
+
+    appendChatMessage("user", question);
+    const thinkingEl = appendChatMessage("assistant", "Thinking...");
+    thinkingEl.classList.add("chat-thinking");
+
+    fetch(CHAT_URL + "?q=" + encodeURIComponent(question))
+      .then(r => {
+        if (!r.ok) throw new Error("status " + r.status);
+        return r.json();
+      })
+      .then(data => {
+        thinkingEl.classList.remove("chat-thinking");
+        thinkingEl.innerHTML = renderChatText(data.answer);
+      })
+      .catch(err => {
+        thinkingEl.classList.remove("chat-thinking");
+        thinkingEl.classList.add("chat-error-msg");
+        thinkingEl.textContent = "That question took too long or something went wrong. Try a simpler or more specific question.";
+      })
+      .finally(() => {
+        input.disabled = false;
+        btn.disabled = false;
+        input.focus();
+      });
+  }
+
+  document.getElementById("chat-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const input = document.getElementById("chat-input");
+    const question = input.value.trim();
+    if (!question) return;
+    input.value = "";
+    sendChatQuestion(question);
+  });
+
+  loadTopTrades();
+  loadAnomalies();
+  loadLargeCompanyActivity();
+</script>
+
+</body>
+</html>

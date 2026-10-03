@@ -7,6 +7,7 @@ import os
 DATABASE = "edgar_form4"
 OUTPUT_LOCATION = "s3://edgar-form4-sri/athena-query-results/"
 MAX_WAIT_SECONDS = 60  # give up if a query takes longer than this
+MAX_ROWS_RETURNED = 10  # trim results before they enter the agent's conversation
 
 def get_athena_client():
     if os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
@@ -81,4 +82,12 @@ def run_query(sql: str) -> dict:
         values = [col.get("VarCharValue", "") for col in row["Data"]]
         data_rows.append(dict(zip(headers, values)))
 
-    return {"success": True, "rows": data_rows}
+    if len(data_rows) > MAX_ROWS_RETURNED:
+        return {
+            "success": True,
+            "rows": data_rows[:MAX_ROWS_RETURNED],
+            "truncated": True,
+            "rows_returned": MAX_ROWS_RETURNED,
+        }
+
+    return {"success": True, "rows": data_rows, "truncated": False}

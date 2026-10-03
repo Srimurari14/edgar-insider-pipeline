@@ -45,5 +45,13 @@ SELECT
             OR security_title LIKE '%Debenture%' OR REGEXP_LIKE(security_title, '[0-9]+\.[0-9]+%')
             OR transaction_code = 'J'
         THEN true ELSE false
-    END AS dollar_value_unreliable
+    END AS dollar_value_unreliable,
+    CASE 
+        WHEN transaction_code IS NULL AND transaction_shares IS NULL
+        THEN true ELSE false 
+    END AS is_empty_transaction,
+    CASE 
+        WHEN transaction_shares IS NOT NULL AND transaction_price_per_share IS NULL
+        THEN true ELSE false 
+    END AS has_no_price
 FROM {{ref('stg_form4_transactions')}}
