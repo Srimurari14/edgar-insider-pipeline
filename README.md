@@ -47,7 +47,7 @@ flowchart TD
 | Compute | AWS Lambda (containerized), AWS CodeBuild |
 | Orchestration | AWS Step Functions (Standard) |
 | Scheduling | Amazon EventBridge Scheduler |
-| Agent | Groq (`openai/gpt-oss-120b`), hand-written tool-calling loop |
+| Agent | Groq (`openai/gpt-oss-20b`), hand-written tool-calling loop |
 | Serving | API Gateway (HTTP API), Lambda, S3 static site, CloudFront |
 | IAM | Scoped roles per service, built step by step from real access errors, not guessed upfront |
 
@@ -97,9 +97,9 @@ All four steps run inside one Step Functions state machine. Each step waits for 
 ## Data model
 
 - **`stg_form4_transactions`** (view): 23-column pass-through from silver, with light renaming and typing.
-- **`fct_transactions`** (table): one row per transaction. Adds `transaction_classification` (Buy, Sell, Merger Disposition, or Other), `dollar_value`, `is_debt_security`, `is_nonstandard_pricing`, and `dollar_value_unreliable`. Those last flags came from real outliers found in the data, traced back to the source filings, confirmed to be parsed correctly, and flagged instead of deleted. Currently 61,939 rows.
+- **`fct_transactions`** (table): one row per transaction. Adds `transaction_classification`, `dollar_value`, and five quality flags: `is_debt_security`, `is_nonstandard_pricing`, `dollar_value_unreliable`, `is_empty_transaction`, and `has_no_price`. Each flag came from a real problem found in the data, traced to the source filings, and flagged rather than deleted.  
 - **`dim_issuers`, `dim_owners`** (tables): one row per company or person (by CIK), keeping only the most recent filing's name and details. Older names are not kept, and matching similar names across different CIKs was left out on purpose, after checking and finding nothing to match.
-- **`agg_issuer_activity`, `agg_owner_activity`** (tables): buy and sell counts and dollar totals per company or person, with debt excluded. Checked against the raw transaction rows directly, not just by comparing row counts.
+- **`agg_issuer_activity`, `agg_owner_activity`** (tables): buy and sell counts and dollar totals per company or person. Rows with unreliable dollar values are excluded from the totals, and rows with no transaction data are excluded from the counts. Checked against the raw transaction rows directly, not just by comparing row counts.
 
 There are 25 dbt tests across these models (checking for missing values, valid values, uniqueness, and correct references between tables). All 25 currently pass.
 
@@ -123,6 +123,12 @@ Two layers, and only one of them is the real defense.
 
 A single self-contained HTML file on S3, served through CloudFront with the bucket kept private. Four read endpoints behind API Gateway, all backed by one Lambda: top trades by day with date navigation, flagged anomalies with the explanation text pulled from the original filing, issuer search, and most active companies. The chat panel calls a second Lambda that wraps the agent.
 
+## Data quality findings
+
+**Rows with no transaction data.** A Form 4 has two sections, one for ordinary stock transactions and one for derivatives such as options, RSUs and DSUs. This pipeline parses only the first. When a filing holds nothing but derivative activity, a row is still written with the filing metadata and every trade field null. That is 8.1% of the table, unevenly spread: one issuer had 15 of its 18 rows in this state, so a naive count reported 18 transactions where 3 trades had actually occurred. Flagged with `is_empty_transaction` and excluded from aggregate counts. Parsing derivative transactions properly is a known gap, not yet built.
+
+**Rows with a share count and no price.** 6.1% of the table. These are real transactions with no dollar value attached, such as gifts, awards, and some option exercises. Flagged with `has_no_price`, counted as transactions, and contributing nothing to dollar totals.  
+
 ## Key decisions and why
 
 **Athena instead of Redshift.** Athena only charges for what you query and has no cost when idle. Redshift Serverless charges for capacity even when it is not being used. For a small workload like this, Athena is simpler and cheaper.
@@ -130,6 +136,8 @@ A single self-contained HTML file on S3, served through CloudFront with the buck
 **Step Functions and EventBridge instead of Airflow.** A pipeline that is supposed to run every day on its own needs to keep running even if your laptop is off. Local Airflow stops when your computer is off. Managed Airflow (MWAA) stays on, but costs money even when idle. Step Functions and EventBridge stay on and cost close to nothing at this scale.
 
 **CodeBuild instead of Lambda for running dbt.** dbt was first set up to run inside Lambda, like the other two functions. It kept failing with an error tied to Python's multiprocessing. The real cause: Lambda's environment has no `/dev/shm`, and dbt always tries to use it when it starts up, no matter what settings are used. This is a known, confirmed limitation of running dbt inside Lambda, not something fixable with a setting. CodeBuild runs full containers that do have `/dev/shm`, so the problem does not come up there at all.
+
+**CodeBuild runs dbt from its container image, not from git.** The project is configured as `NO_SOURCE`, so dbt runs against the models baked into `Dockerfile.codebuild_dbt`. A model change ships by rebuilding and pushing that image. Pushing to git alone leaves the deployed models unchanged, and the next scheduled run will rebuild the tables from the image's older SQL.
 
 **EventBridge Scheduler instead of the older EventBridge Rules.** The older Rules only support UTC time, so a fixed schedule would slowly drift by an hour twice a year as clocks change. EventBridge Scheduler supports real timezones and adjusts for daylight saving automatically. Using the right tool solves the problem, instead of writing extra code to work around it.
 
@@ -158,10 +166,10 @@ The pipeline (ingest, parse, model, orchestrate, schedule) is built and running 
 
 **Known limitations:**
 
-- The chat answers simple questions but does not finish broad ones. The free tier allows 8,000 tokens per minute, and because the full conversation is resent on every step, a few steps of query results is enough to exceed that. Query results are now trimmed to 10 rows and the step limit is down to 4, which stops the token error, but broad questions can now run out of steps before answering. Being worked on.
-- API Gateway's HTTP API has a fixed 30 second timeout that cannot be raised. A multi-step question can take longer than that. The proper fix is to run the job in the background and poll for the result. Not built yet.
-- No evaluation harness. There is no test set of questions with known answers, so answer quality is judged by reading output rather than measured.
+- The chat is not reliable in production. The agent itself works and gives accurate answers, but API Gateway's HTTP API has a fixed 30 second timeout that cannot be raised, and inference latency on the model provider's free tier swings between 4 and 25 seconds per call with no warning. A multi-step question needs several calls, so on a slow day every request exceeds the ceiling. Trimming query results, cutting the step limit from 8 to 4, and moving to a smaller model all helped and none of them fix it. The right fix is to run the agent as a background job and have the browser poll for the result, which removes the ceiling entirely. Not built yet.
+- No evaluation harness. There is no test set of questions with known answers, so answer quality is checked by querying Athena by hand and comparing. That caught several real errors, but it does not scale.
 - The agent has no memory between questions.
+- Derivative transactions are not parsed, which is what produces the empty rows described above.
 - No matching of similar names or entities across different CIKs.
 
 ## A note on how this was built
