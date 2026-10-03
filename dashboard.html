@@ -137,6 +137,16 @@
     padding: 1.5rem 0 0;
   }
 
+  .chat-retry-btn {
+    margin-left: 0.5rem;
+    background: none;
+    border: 1px solid currentColor;
+    color: inherit;
+    font: inherit;
+    padding: 0.1rem 0.5rem;
+    cursor: pointer;
+  }
+
   .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; }
   @media (max-width: 700px) { .two-col { grid-template-columns: 1fr; } }
 
@@ -442,6 +452,10 @@
         document.getElementById("current-date").textContent = fmtDate(data.date);
         document.getElementById("date-picker").value = data.date || "";
 
+        // Clear any note from a previous date before deciding whether to add one.
+        const existingNote = document.getElementById("no-trades-note");
+        if (existingNote) existingNote.remove();
+
         if (data.buys.length === 0 && data.sells.length === 0) {
           document.querySelector("#buys-table tbody").innerHTML = "";
           document.querySelector("#sells-table tbody").innerHTML = "";
@@ -450,8 +464,6 @@
             `<div class="empty-note" id="no-trades-note">No trades recorded for this date.</div>`
           );
         } else {
-          const existingNote = document.getElementById("no-trades-note");
-          if (existingNote) existingNote.remove();
           document.querySelector("#buys-table tbody").innerHTML =
             data.buys.map(row => rowHTML(row, "buy")).join("");
           document.querySelector("#sells-table tbody").innerHTML =
@@ -618,13 +630,15 @@
     return msgDiv;
   }
 
-  function sendChatQuestion(question) {
+  function sendChatQuestion(question, isRetry) {
     const input = document.getElementById("chat-input");
     const btn = document.getElementById("chat-send-btn");
     input.disabled = true;
     btn.disabled = true;
 
-    appendChatMessage("user", question);
+    // On a retry the question is already on screen, so don't add it twice.
+    if (!isRetry) appendChatMessage("user", question);
+
     const thinkingEl = appendChatMessage("assistant", "Thinking...");
     thinkingEl.classList.add("chat-thinking");
 
@@ -640,7 +654,16 @@
       .catch(err => {
         thinkingEl.classList.remove("chat-thinking");
         thinkingEl.classList.add("chat-error-msg");
-        thinkingEl.textContent = "That question took too long or something went wrong. Try a simpler or more specific question.";
+        thinkingEl.textContent = "That question took too long or something went wrong. ";
+
+        const retryBtn = document.createElement("button");
+        retryBtn.textContent = "Retry";
+        retryBtn.className = "chat-retry-btn";
+        retryBtn.addEventListener("click", () => {
+          thinkingEl.remove();
+          sendChatQuestion(question, true);
+        });
+        thinkingEl.appendChild(retryBtn);
       })
       .finally(() => {
         input.disabled = false;
