@@ -1,6 +1,8 @@
 # EDGAR Insider-Trading Pipeline
 
-An automated data pipeline that pulls SEC Form 4 insider-trading filings every day, models them into an analytics-ready warehouse, and runs on its own schedule. Built to show real data engineering and analytics engineering work, start to finish.
+An automated data pipeline that pulls SEC Form 4 insider-trading filings every day, models them into an analytics-ready warehouse, runs on its own schedule, and serves the results through a public dashboard with a question-answering agent on top.
+
+**Live site:** https://d1mpwilwebyjo4.cloudfront.net
 
 ## What this is
 
@@ -16,10 +18,17 @@ flowchart TD
     B --> C[Lambda: discover_ingest, fetch prior day's Form 4 index]
     C --> D[Lambda: parse, XML to silver Parquet]
     D --> E[Athena: MSCK REPAIR TABLE, register new S3 partitions]
-    E --> F[CodeBuild: dbt build, staging plus 5 marts plus 19 tests]
+    E --> F[CodeBuild: dbt build, staging plus 5 marts plus 25 tests]
     C -.-> S3B[(S3 bronze, raw filings)]
     D -.-> S3S[(S3 silver, parsed transactions)]
     F -.-> S3G[(S3 gold, dbt tables via Athena and Glue)]
+
+    G[CloudFront and S3 static site] --> H[API Gateway]
+    H --> I[Lambda: edgar-dashboard, 4 endpoints]
+    H --> J[Lambda: edgar-chat, agent loop]
+    I --> S3G
+    J --> S3G
+    J -.-> S3B
 ```
 
 **Storage layers:**
@@ -38,6 +47,8 @@ flowchart TD
 | Compute | AWS Lambda (containerized), AWS CodeBuild |
 | Orchestration | AWS Step Functions (Standard) |
 | Scheduling | Amazon EventBridge Scheduler |
+| Agent | Groq (`openai/gpt-oss-120b`), hand-written tool-calling loop |
+| Serving | API Gateway (HTTP API), Lambda, S3 static site, CloudFront |
 | IAM | Scoped roles per service, built step by step from real access errors, not guessed upfront |
 
 ## Repo structure
@@ -49,37 +60,68 @@ scripts/
   config.py, utils.py             # shared config and helpers
   driver.py                       # multi-day local driver (weekend/holiday handling)
   dummy.py                        # manual backfill script
+  agent.py                        # tool-calling agent loop
+  athena_client.py                # query runner, read-only check, result trimming
+  bronze_fetch.py                 # pulls raw filing XML back out of bronze
+  schema.py                       # table description given to the model
   sql/silver_table.sql            # Athena table definition for silver
 lambda_handlers/
   discover_ingest_handler.py      # Lambda wrapper for discover() and ingest()
   parse_handler.py                # Lambda wrapper for parse()
+  dashboard_handler.py            # 4 read endpoints for the site
+  chat_handler.py                 # wraps agent.ask()
 edgar_dbt/
   models/staging/form4/           # staging view, source, and tests
   models/marts/core/              # 5 marts and referential-integrity tests
+dashboard.html                    # the site, single self-contained file
 Dockerfile.discover_ingest        # Lambda container image
 Dockerfile.parse                  # Lambda container image
 Dockerfile.codebuild_dbt          # CodeBuild container image (Debian based, not Lambda base)
+Dockerfile.dashboard              # Lambda container image
+Dockerfile.chat                   # Lambda container image
 *-permissions.json, trust-policy*.json, ecr-lifecycle-policy.json
                                    # IAM policy files, kept as a record of what is applied
 ```
+# IAM policy files, kept as a record of what is applied
+
 
 ## The pipeline, step by step
 
 1. **`discover_ingest` (Lambda)**: figures out "yesterday," pulls that day's Form 4 index from EDGAR, writes the raw filings to S3 bronze. Handles weekends, EDGAR holiday closures, and real errors as three separate cases.
 2. **`parse` (Lambda)**: checks which filings are already in silver, parses only the new ones from XML into the transaction table, and appends them to S3 silver.
 3. **Athena `MSCK REPAIR TABLE`**: registers any new S3 partitions in the Glue catalog. This step is needed because Athena does not automatically notice new partitions from files that were just written.
-4. **CodeBuild `dbt build`**: runs the full dbt project (1 staging model, 5 marts, 19 tests) against the now up-to-date silver data.
+4. **CodeBuild `dbt build`**: runs the full dbt project (1 staging model, 5 marts, 25 tests) against the now up-to-date silver data.
 
 All four steps run inside one Step Functions state machine. Each step waits for the one before it to finish, so nothing moves on before the previous step is actually done. EventBridge Scheduler triggers the whole thing every day at 6am ET, using a real timezone (`America/New_York`) instead of a fixed UTC offset, so it does not drift when clocks change for daylight saving.
 
 ## Data model
 
 - **`stg_form4_transactions`** (view): 23-column pass-through from silver, with light renaming and typing.
-- **`fct_transactions`** (table): one row per transaction. Adds `transaction_classification` (Buy, Sell, Merger Disposition, or Other), `dollar_value`, and `is_debt_security`. That last flag was added after a real bond, filed through Form 4's stock fields, produced a $1.6 quadrillion outlier during testing. It was traced back to the source, confirmed to be parsed correctly, and flagged instead of deleted.
+- **`fct_transactions`** (table): one row per transaction. Adds `transaction_classification` (Buy, Sell, Merger Disposition, or Other), `dollar_value`, `is_debt_security`, `is_nonstandard_pricing`, and `dollar_value_unreliable`. Those last flags came from real outliers found in the data, traced back to the source filings, confirmed to be parsed correctly, and flagged instead of deleted. Currently 61,939 rows.
 - **`dim_issuers`, `dim_owners`** (tables): one row per company or person (by CIK), keeping only the most recent filing's name and details. Older names are not kept, and matching similar names across different CIKs was left out on purpose, after checking and finding nothing to match.
 - **`agg_issuer_activity`, `agg_owner_activity`** (tables): buy and sell counts and dollar totals per company or person, with debt excluded. Checked against the raw transaction rows directly, not just by comparing row counts.
 
 There are 25 dbt tests across these models (checking for missing values, valid values, uniqueness, and correct references between tables). All 25 currently pass.
+
+## The agent
+
+`scripts/agent.py` runs a plan, act, observe, correct loop in plain Python. No agent framework. The model gets two tools: run a read-only SQL query against Athena, and fetch the raw XML of one specific filing out of bronze. It writes its own SQL from a table description in the prompt, reads the result, and decides whether to query again or answer.
+
+It does correct itself. In one run, its first query used `ILIKE`, which Athena's engine does not support. The query failed, the model read the error, and rewrote it with `LIKE` and `lower()` without being told what was wrong.
+
+This is direct function calling, not RAG. There is no vector store, no embeddings, and no retrieval step. There is also no conversation memory: each question starts fresh.
+
+## Guardrails
+
+Two layers, and only one of them is the real defense.
+
+**IAM.** The agent's roles have read-only access to Athena, Glue, and S3, with write access limited to the Athena query results folder. No permission to delete objects or to create, alter, or drop tables. This was tested, not assumed: a real `DROP TABLE` was run through the agent's own credentials, failed with an access-denied error on `glue:DeleteTable`, and the table's row count was checked before and after to confirm nothing changed.
+
+**A text check in code.** `is_read_only()` rejects any query that does not start with SELECT or WITH before it reaches Athena. This is a fast rejection for obvious cases, not a security boundary. A query starting with `WITH` and containing a `DELETE` would pass this check. It is then rejected by Athena's own SQL grammar, which is another reason the IAM layer is the one that matters.
+
+## Dashboard and chat
+
+A single self-contained HTML file on S3, served through CloudFront with the bucket kept private. Four read endpoints behind API Gateway, all backed by one Lambda: top trades by day with date navigation, flagged anomalies with the explanation text pulled from the original filing, issuer search, and most active companies. The chat panel calls a second Lambda that wraps the agent.
 
 ## Key decisions and why
 
@@ -93,20 +135,35 @@ There are 25 dbt tests across these models (checking for missing values, valid v
 
 **Adding an explicit partition repair step.** New files in S3 are not automatically visible to Athena as new partitions. This was found as a real bug: `fct_transactions` kept showing an old row count even after new data had been added, because Athena was still looking at old partition information. It was caught by comparing row counts at every stage (how many rows Lambda wrote, how many Athena could see, how many dbt built), not by trusting that the pipeline ran without errors. The fix was to add a clear repair step to the pipeline, rather than hiding it inside the dbt step.
 
+**Writing the agent loop by hand instead of using a framework.** The loop is short enough to write directly, and writing it directly means the token cost, the step limit, and the failure handling are all visible and adjustable. A framework would have hidden exactly the parts that turned out to need fixing.
+
+## Anomalies found in the data
+
+Large outliers in `dollar_value` were traced back to the original filings using the agent's own filing-fetch tool. Four have explanations:
+
+- A bond reported through the stock fields, where the price was the total principal of a note issue (Angel Oak Financial Strategies Income Term Trust, about $1.6 quadrillion).
+- A debt-to-equity conversion, explained in the filing's own remarks field (InnSuites Hospitality Trust, about $5.49 trillion).
+- A bond redemption where the shares field held the dollar face value of the redeemed notes (DNP Select Income Fund, about $1.1 quadrillion).
+- A purchase at $180,000 per share that is genuinely in the raw filing with no remarks or footnotes anywhere (Reborn Coffee). No explanation found. Left flagged and open rather than quietly corrected.
+
+One more, a second InnSuites sale at $22,593.60 per share, is still untraced.
+
 ## Cost
 
-Built to stay inside AWS's free tier. S3, Lambda, Step Functions, and EventBridge Scheduler cost close to nothing at this scale. CodeBuild gives 100 free build-minutes per month, and a daily dbt build (about 25 to 30 seconds) rounds up to roughly 1 billed minute per day, which is well inside that limit. Expected cost: $0 per month.
+Built to stay inside AWS's free tier. S3, Lambda, Step Functions, and EventBridge Scheduler cost close to nothing at this scale. CodeBuild gives 100 free build-minutes per month, and a daily dbt build (about 25 to 30 seconds) rounds up to roughly 1 billed minute per day, which is well inside that limit. The model runs on Groq's free tier. Expected cost: $0 per month.
 
 ## Current status
 
-The full pipeline (ingest, parse, model, orchestrate, schedule) is built and running on its own every day. Row counts have been checked and are consistent, with no gaps, as of the last verified run.
+The pipeline (ingest, parse, model, orchestrate, schedule) is built and running on its own every day. The dashboard and the agent are built and deployed, and the site is public. Row counts have been checked and are consistent, with no gaps, as of the last verified run.
 
-**Not built yet:**
-- An AI agent layer that can answer questions by planning, querying, and checking its own results (using direct function calls, not retrieval or RAG)
-- A way to test and measure how well that agent performs
-- A dashboard
-- Matching similar names or entities across different CIKs (left out on purpose for now)
+**Known limitations:**
+
+- The chat answers simple questions but does not finish broad ones. The free tier allows 8,000 tokens per minute, and because the full conversation is resent on every step, a few steps of query results is enough to exceed that. Query results are now trimmed to 10 rows and the step limit is down to 4, which stops the token error, but broad questions can now run out of steps before answering. Being worked on.
+- API Gateway's HTTP API has a fixed 30 second timeout that cannot be raised. A multi-step question can take longer than that. The proper fix is to run the job in the background and poll for the result. Not built yet.
+- No evaluation harness. There is no test set of questions with known answers, so answer quality is judged by reading output rather than measured.
+- The agent has no memory between questions.
+- No matching of similar names or entities across different CIKs.
 
 ## A note on how this was built
 
-Every part described here, the parsing logic, the entity matching approach, the orchestration design, and every fix listed above, was built from scratch for this project. The overall patterns used (layered storage, star-schema style modeling, an agent that calls tools) are common patterns in the field, not something invented here. What is original is applying them to this real, messy, publicly available dataset.
+Every part described here, the parsing logic, the orchestration design, the agent loop, and every fix listed above, was built from scratch for this project. The overall patterns used (layered storage, star-schema style modeling, an agent that calls tools) are common patterns in the field, not something invented here. What is original is applying them to this real, messy, publicly available dataset.
