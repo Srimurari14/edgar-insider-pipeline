@@ -109,7 +109,7 @@ All four steps run inside one Step Functions state machine. Each step waits for 
 - **`dim_issuers`, `dim_owners`** (tables): one row per company or person (by CIK), keeping only the most recent filing's name and details. `dim_owners` also carries `owner_name_search`. Older names are not kept, and matching similar names across different CIKs was left out on purpose, after checking and finding nothing to match.
 - **`agg_issuer_activity`, `agg_owner_activity`** (tables): buy and sell counts and dollar totals per company or person. Rows with unreliable dollar values are excluded from the totals, and rows with no transaction data are excluded from the counts. Checked against the raw transaction rows directly, not just by comparing row counts.
 
-There are 25 dbt tests across these models (checking for missing values, valid values, uniqueness, and correct references between tables). All currently pass.
+There are 19 dbt tests across these models (checking for missing values, valid values, uniqueness, and correct references between tables). All currently pass.
 
 ## The agent
 
@@ -196,7 +196,7 @@ One more, a second InnSuites sale at about $22,593.60 per share, is still untrac
 
 ## Cost
 
-Built to stay inside AWS's free tier. S3, Lambda, Step Functions, and EventBridge Scheduler cost close to nothing at this scale. CodeBuild gives 100 free build-minutes per month, and a daily dbt build (about 25 to 30 seconds) rounds up to roughly 1 billed minute per day, which is well inside that limit. The model runs on Groq's free tier. Expected cost: $0 per month.
+Built to stay inside AWS's free tier. S3, Lambda, Step Functions, and EventBridge Scheduler cost close to nothing at this scale. CodeBuild gives 100 free build-minutes per month, and a daily dbt build (about  to 30 seconds) rounds up to roughly 1 billed minute per day, which is well inside that limit. The model runs on Groq's free tier. Expected cost: $0 per month.
 
 ## Current status
 
