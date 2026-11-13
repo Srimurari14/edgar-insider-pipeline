@@ -196,7 +196,7 @@ One more, a second InnSuites sale at about $22,593.60 per share, is still untrac
 
 ## Cost
 
-Built to stay inside AWS's free tier. S3, Lambda, Step Functions, and EventBridge Scheduler cost close to nothing at this scale. CodeBuild gives 100 free build-minutes per month, and a daily dbt build (about  to 30 seconds) rounds up to roughly 1 billed minute per day, which is well inside that limit. The model runs on Groq's free tier. Expected cost: $0 per month.
+Built to stay inside AWS's free tier. S3, Lambda, Step Functions, and EventBridge Scheduler cost close to nothing at this scale. CodeBuild gives 100 free build-minutes per month, and a daily dbt build (about 25 to 30 seconds) rounds up to roughly 1 billed minute per day, which is well inside that limit. The model runs on Groq's free tier. Expected cost: $0 per month.
 
 ## Current status
 
