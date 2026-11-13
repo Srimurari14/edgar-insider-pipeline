@@ -1,0 +1,137 @@
+{
+  "Comment": "A description of my state machine",
+  "StartAt": "discover_ingest",
+  "States": {
+    "discover_ingest": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Output": "{% $states.result.Payload %}",
+      "Arguments": {
+        "Payload": "{% $states.input %}",
+        "FunctionName": "arn:aws:lambda:us-east-1:221082190990:function:edgar-discover-ingest:$LATEST"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "NotifyDiscoverIngestFailed"
+        }
+      ],
+      "Next": "parse"
+    },
+    "parse": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Output": "{% $states.result.Payload %}",
+      "Arguments": {
+        "Payload": "{% $states.input %}",
+        "FunctionName": "arn:aws:lambda:us-east-1:221082190990:function:edgar-parse:$LATEST"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "NotifyParseFailed"
+        }
+      ],
+      "Next": "Athena StartQueryExecution"
+    },
+    "Athena StartQueryExecution": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::athena:startQueryExecution.sync",
+      "Arguments": {
+        "QueryString": "MSCK REPAIR TABLE silver_form4_transactions",
+        "QueryExecutionContext": {
+          "Database": "edgar_form4"
+        },
+        "WorkGroup": "primary",
+        "ResultConfiguration": {
+          "OutputLocation": "s3://edgar-form4-sri/athena-query-results/"
+        }
+      },
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "NotifyRepairFailed"
+        }
+      ],
+      "Next": "CodeBuild StartBuild"
+    },
+    "CodeBuild StartBuild": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::codebuild:startBuild.sync",
+      "Arguments": {
+        "ProjectName": "edgar-dbt-build"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "NotifyDbtFailed"
+        }
+      ],
+      "End": true
+    },
+    "NotifyDiscoverIngestFailed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Arguments": {
+        "TopicArn": "arn:aws:sns:us-east-1:221082190990:edgar-pipeline-failures",
+        "Subject": "EDGAR pipeline FAILED: discover_ingest",
+        "Message": "{% 'discover_ingest failed.\n\nError:\n' & $string($states.input) %}"
+      },
+      "Next": "PipelineFailed"
+    },
+    "NotifyParseFailed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Arguments": {
+        "TopicArn": "arn:aws:sns:us-east-1:221082190990:edgar-pipeline-failures",
+        "Subject": "EDGAR pipeline FAILED: parse",
+        "Message": "{% 'parse failed.\n\nError:\n' & $string($states.input) %}"
+      },
+      "Next": "PipelineFailed"
+    },
+    "NotifyRepairFailed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Arguments": {
+        "TopicArn": "arn:aws:sns:us-east-1:221082190990:edgar-pipeline-failures",
+        "Subject": "EDGAR pipeline FAILED: athena repair",
+        "Message": "{% 'Athena MSCK repair failed.\n\nError:\n' & $string($states.input) %}"
+      },
+      "Next": "PipelineFailed"
+    },
+    "NotifyDbtFailed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Arguments": {
+        "TopicArn": "arn:aws:sns:us-east-1:221082190990:edgar-pipeline-failures",
+        "Subject": "EDGAR pipeline FAILED: dbt build",
+        "Message": "{% 'dbt CodeBuild failed.\n\nError:\n' & $string($states.input) %}"
+      },
+      "Next": "PipelineFailed"
+    },
+    "PipelineFailed": {
+      "Type": "Fail",
+      "Error": "PipelineFailed",
+      "Cause": "A pipeline state failed. See the SNS alert email for details."
+    }
+  },
+  "QueryLanguage": "JSONata"
+}
