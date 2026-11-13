@@ -13,7 +13,8 @@ Columns:
   issuer_name (string)
   issuer_trading_symbol (string) - stock ticker
   owner_cik (string) - the insider's SEC identifier
-  owner_name (string)
+  owner_name (string) - the insider's name AS FILED, stored surname-first (e.g. "Ellis Emily", "Ellison Marvin R"). Do not assume first-name-first. To search by a person's name, use owner_name_search instead. See "Looking up a person by name" below.
+  owner_name_search (string) - a normalized, order-independent version of owner_name for name lookups: lowercased, punctuation replaced with spaces, words sorted alphabetically. "Ellis Emily" and "Emily Ellis" both become "ellis emily". Use THIS column to find a person, never owner_name directly. See "Looking up a person by name" below.
   is_director, is_officer, is_ten_percent_owner, is_other (boolean) - insider's role
   officer_title (string, nullable)
   other_text (string, nullable) - free text, used when relationship doesn't fit the other role flags
@@ -29,9 +30,31 @@ Columns:
   dollar_value (double, nullable) - transaction_shares * transaction_price_per_share. Null when either input is null.
   is_debt_security (boolean) - true if the SECURITY ITSELF is a bond/note (based on security_title). Does not check transaction_code.
   is_nonstandard_pricing (boolean) - true if the TRANSACTION TYPE makes price_per_share unreliable (currently: transaction_code = 'J', e.g. debt-to-equity conversions). Independent of is_debt_security; a row can trip this flag while being genuine equity.
-  dollar_value_unreliable (boolean) - true if EITHER is_debt_security OR is_nonstandard_pricing is true. Use this as the general-purpose filter for "is dollar_value trustworthy for this row."
+  is_implausible_price (boolean) - true if transaction_price_per_share exceeds 1,000,000. Catches filing errors where a total value or other figure was entered into the per-share field, producing impossible prices (e.g. ordinary shares priced at millions per share). This is a value sanity check, independent of the security type and transaction code, so it catches bad numbers that is_debt_security and is_nonstandard_pricing miss.
+  dollar_value_unreliable (boolean) - true if is_debt_security OR is_nonstandard_pricing OR is_implausible_price is true. Use this as the general-purpose filter for "is dollar_value trustworthy for this row."
   is_empty_transaction (boolean) - true if the row has NO trade data at all (transaction_code, transaction_shares and transaction_price_per_share are all null). See "Empty rows" below. These rows are about 8% of the table. Exclude them whenever you count transactions.
   has_no_price (boolean) - true if the row HAS a share count but NO price per share. These are real transactions with no dollar value attached (gifts, awards, some option exercises). About 6% of the table. Count them as transactions, but their dollar_value is null so they contribute nothing to any sum.
+
+Looking up a person by name:
+EDGAR stores every insider's name surname-first, for example "Ellis Emily", "Ellison Marvin R",
+"Bush John Ellis". Users will type names in normal order, like "Emily Ellis". Never match a user's
+name against owner_name directly, it will fail on the word order.
+
+Instead, use the owner_name_search column, which is present on fct_transactions, dim_owners and
+agg_owner_activity. It holds the name lowercased, with punctuation turned into spaces and the words
+sorted alphabetically. To find a person:
+  1. Take the name the user gave, lowercase it, and split it into words.
+  2. Match rows where owner_name_search contains ALL of those words, each as its own LIKE term, for
+     example for "Emily Ellis":
+       WHERE owner_name_search LIKE '%ellis%' AND owner_name_search LIKE '%emily%'
+     This is order-independent, so it finds "ellis emily" regardless of how the user typed it, and it
+     still matches when the stored name has extra words the user left out (a middle initial, say).
+  3. This can return more than one person (several people share a surname, and a short search like a
+     single name is broad). That is expected, not an error. When more than one owner_cik matches,
+     do not assume the first row is the person. Either narrow by the company the user mentioned, or
+     tell the user you found multiple people and list their names so they can pick.
+  4. Once you have the right owner_cik, query fct_transactions or the agg tables by owner_cik, which
+     is exact, rather than continuing to match on the name.
 
 Empty rows (is_empty_transaction = true):
 A Form 4 has two sections, one for ordinary stock transactions and one for derivative
@@ -55,7 +78,9 @@ Columns: issuer_cik (string), issuer_name (string), issuer_trading_symbol (strin
 
 Table: dim_owners
 One row per insider (owner_cik), showing their most recent known name.
-Columns: owner_cik (string), owner_name (string)
+Columns:
+  owner_cik (string), owner_name (string)
+  owner_name_search (string) - normalized name for lookups (see "Looking up a person by name" above). Use this to resolve a user's name to an owner_cik, then query other tables by that owner_cik.
 
 Table: agg_issuer_activity
 One row per company, summarizing all its insider activity. Pre-computed, so prefer this
@@ -72,6 +97,7 @@ One row per insider, summarizing their trading activity across companies. Pre-co
 so prefer this over aggregating fct_transactions yourself for broad questions about a person.
 Columns:
   owner_cik (string), owner_name (string)
+  owner_name_search (string) - normalized name for lookups (see "Looking up a person by name" above).
   last_transaction_date (timestamp)
   total_buy_value, total_sell_value (double) - dollar totals, excluding rows where dollar_value_unreliable is true
   total_buy_count, total_sell_count (bigint) - number of transactions, excluding unreliable and empty rows
@@ -79,8 +105,9 @@ Columns:
 General notes:
   - filing_date is a string column, not a native date type. Always compare it as a string.
   - period_of_report and transaction_date are real timestamp columns and can be compared with standard date functions.
+  - To find a person by name, match on owner_name_search, never on owner_name. See "Looking up a person by name" above.
   - When counting transactions in fct_transactions, add WHERE is_empty_transaction = false, or the count will include filings that hold no stock trades. A raw count(*) for one company can be several times larger than the number of real trades.
   - For questions about TYPICAL or AGGREGATE trade dollar amounts (totals, averages, "how much did insiders buy this month"), filter with WHERE dollar_value_unreliable = false. The two agg tables already do this.
-  - For questions specifically about OUTLIERS, ANOMALIES, or the LARGEST/SMALLEST values ("what's the biggest trade ever", "any suspicious numbers"), do NOT filter out unreliable rows by default. Query across all rows first, since the anomaly itself may be exactly the kind of row dollar_value_unreliable is designed to flag. If you find a large or unusual dollar_value, check its is_debt_security and is_nonstandard_pricing values and explain what they mean as part of your answer, rather than excluding the row before ever seeing it.
+  - For questions specifically about OUTLIERS, ANOMALIES, or the LARGEST/SMALLEST values ("what's the biggest trade ever", "any suspicious numbers"), do NOT filter out unreliable rows by default. Query across all rows first, since the anomaly itself may be exactly the kind of row dollar_value_unreliable is designed to flag. If you find a large or unusual dollar_value, check its is_debt_security, is_nonstandard_pricing and is_implausible_price values and explain what they mean as part of your answer, rather than excluding the row before ever seeing it.
   - When you use ORDER BY with a LIMIT, add a tiebreaker column such as accession. Many rows share the same filing_date, so ordering by date alone returns an arbitrary subset and the same query can give different rows each time. Never describe such a result as "the most recent N" unless the sort is unambiguous.
 """

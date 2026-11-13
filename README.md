@@ -10,6 +10,8 @@ When a company insider (CEO, director, large shareholder) buys or sells stock in
 
 No synthetic data. No third-party API wrapper for the core parsing. The messy parts (XML formats that change across filing years, name variants across filers, non-equity instruments filed through equity fields) are handled directly, because that is the actual engineering problem worth solving.
 
+Current scale: about 86,000 transaction rows, growing by a few thousand each day, collected incrementally since July 1, 2026.
+
 ## Architecture
 
 ```mermaid
@@ -18,17 +20,21 @@ flowchart TD
     B --> C[Lambda: discover_ingest, fetch prior day's Form 4 index]
     C --> D[Lambda: parse, XML to silver Parquet]
     D --> E[Athena: MSCK REPAIR TABLE, register new S3 partitions]
-    E --> F[CodeBuild: dbt build, staging plus 5 marts plus 25 tests]
+    E --> F[CodeBuild: dbt build, staging plus 5 marts plus tests]
     C -.-> S3B[(S3 bronze, raw filings)]
     D -.-> S3S[(S3 silver, parsed transactions)]
     F -.-> S3G[(S3 gold, dbt tables via Athena and Glue)]
 
     G[CloudFront and S3 static site] --> H[API Gateway]
-    H --> I[Lambda: edgar-dashboard, 4 endpoints]
-    H --> J[Lambda: edgar-chat, agent loop]
+    H --> I[Lambda: edgar-dashboard, read endpoints]
+    H --> J[Lambda: edgar-chat, writes job and returns immediately]
+    J --> JOB[(S3 jobs/, pending job record)]
+    J -. async invoke .-> K[Lambda: edgar-chat-worker, runs agent loop, 300s]
+    K --> JOB
+    G -. polls /chat-status .-> I
     I --> S3G
-    J --> S3G
-    J -.-> S3B
+    K --> S3G
+    K -.-> S3B
 ```
 
 **Storage layers:**
@@ -49,6 +55,7 @@ flowchart TD
 | Scheduling | Amazon EventBridge Scheduler |
 | Agent | Groq (`openai/gpt-oss-20b`), hand-written tool-calling loop |
 | Serving | API Gateway (HTTP API), Lambda, S3 static site, CloudFront |
+| Evaluation | Standalone golden-SQL eval harness (`eval_harness.py`) |
 | IAM | Scoped roles per service, built step by step from real access errors, not guessed upfront |
 
 ## Repo structure
@@ -64,12 +71,14 @@ scripts/
   athena_client.py                # query runner, read-only check, result trimming
   bronze_fetch.py                 # pulls raw filing XML back out of bronze
   schema.py                       # table description given to the model
+  eval_harness.py                 # golden-SQL evaluation harness for the agent
   sql/silver_table.sql            # Athena table definition for silver
 lambda_handlers/
   discover_ingest_handler.py      # Lambda wrapper for discover() and ingest()
   parse_handler.py                # Lambda wrapper for parse()
-  dashboard_handler.py            # 4 read endpoints for the site
-  chat_handler.py                 # wraps agent.ask()
+  dashboard_handler.py            # read endpoints for the site, plus /chat-status
+  chat_handler.py                 # accepts a question, writes a job, async-invokes the worker
+  chat_worker_handler.py          # runs agent.ask() in the background, writes the result
 edgar_dbt/
   models/staging/form4/           # staging view, source, and tests
   models/marts/core/              # 5 marts and referential-integrity tests
@@ -79,29 +88,28 @@ Dockerfile.parse                  # Lambda container image
 Dockerfile.codebuild_dbt          # CodeBuild container image (Debian based, not Lambda base)
 Dockerfile.dashboard              # Lambda container image
 Dockerfile.chat                   # Lambda container image
+Dockerfile.chat_worker            # Lambda container image (background agent worker)
 *-permissions.json, trust-policy*.json, ecr-lifecycle-policy.json
                                    # IAM policy files, kept as a record of what is applied
 ```
-# IAM policy files, kept as a record of what is applied
-
 
 ## The pipeline, step by step
 
 1. **`discover_ingest` (Lambda)**: figures out "yesterday," pulls that day's Form 4 index from EDGAR, writes the raw filings to S3 bronze. Handles weekends, EDGAR holiday closures, and real errors as three separate cases.
 2. **`parse` (Lambda)**: checks which filings are already in silver, parses only the new ones from XML into the transaction table, and appends them to S3 silver.
 3. **Athena `MSCK REPAIR TABLE`**: registers any new S3 partitions in the Glue catalog. This step is needed because Athena does not automatically notice new partitions from files that were just written.
-4. **CodeBuild `dbt build`**: runs the full dbt project (1 staging model, 5 marts, 25 tests) against the now up-to-date silver data.
+4. **CodeBuild `dbt build`**: runs the full dbt project (1 staging model, 5 marts, tests) against the now up-to-date silver data.
 
 All four steps run inside one Step Functions state machine. Each step waits for the one before it to finish, so nothing moves on before the previous step is actually done. EventBridge Scheduler triggers the whole thing every day at 6am ET, using a real timezone (`America/New_York`) instead of a fixed UTC offset, so it does not drift when clocks change for daylight saving.
 
 ## Data model
 
-- **`stg_form4_transactions`** (view): 23-column pass-through from silver, with light renaming and typing.
-- **`fct_transactions`** (table): one row per transaction. Adds `transaction_classification`, `dollar_value`, and five quality flags: `is_debt_security`, `is_nonstandard_pricing`, `dollar_value_unreliable`, `is_empty_transaction`, and `has_no_price`. Each flag came from a real problem found in the data, traced to the source filings, and flagged rather than deleted.  
-- **`dim_issuers`, `dim_owners`** (tables): one row per company or person (by CIK), keeping only the most recent filing's name and details. Older names are not kept, and matching similar names across different CIKs was left out on purpose, after checking and finding nothing to match.
+- **`stg_form4_transactions`** (view): pass-through from silver, with light renaming and typing. Also computes `owner_name_search`, a normalized name column used for person lookups (see "Name-order entity resolution" below).
+- **`fct_transactions`** (table): one row per transaction. Adds `transaction_classification`, `dollar_value`, and six quality flags: `is_debt_security`, `is_nonstandard_pricing`, `is_implausible_price`, `dollar_value_unreliable`, `is_empty_transaction`, and `has_no_price`. Each flag came from a real problem found in the data, traced to the source filings, and flagged rather than deleted.
+- **`dim_issuers`, `dim_owners`** (tables): one row per company or person (by CIK), keeping only the most recent filing's name and details. `dim_owners` also carries `owner_name_search`. Older names are not kept, and matching similar names across different CIKs was left out on purpose, after checking and finding nothing to match.
 - **`agg_issuer_activity`, `agg_owner_activity`** (tables): buy and sell counts and dollar totals per company or person. Rows with unreliable dollar values are excluded from the totals, and rows with no transaction data are excluded from the counts. Checked against the raw transaction rows directly, not just by comparing row counts.
 
-There are 25 dbt tests across these models (checking for missing values, valid values, uniqueness, and correct references between tables). All 25 currently pass.
+There are 25 dbt tests across these models (checking for missing values, valid values, uniqueness, and correct references between tables). All currently pass.
 
 ## The agent
 
@@ -110,6 +118,25 @@ There are 25 dbt tests across these models (checking for missing values, valid v
 It does correct itself. In one run, its first query used `ILIKE`, which Athena's engine does not support. The query failed, the model read the error, and rewrote it with `LIKE` and `lower()` without being told what was wrong.
 
 This is direct function calling, not RAG. There is no vector store, no embeddings, and no retrieval step. There is also no conversation memory: each question starts fresh.
+
+### Running the agent as a background job
+
+API Gateway's HTTP API has a fixed 30 second integration timeout that cannot be raised, while inference latency on the model provider's free tier swings between 4 and 25 seconds per call with no warning. A multi-step question needs several calls, so a synchronous request exceeded the ceiling on slow days. Trimming query results, cutting the step limit from 8 to 4, and moving to a smaller model all helped but none of them fixed it.
+
+The fix was to decouple the request from the work. `edgar-chat` now writes a pending job to `s3://.../jobs/{uuid}.json`, async-invokes `edgar-chat-worker` (a separate Lambda with a 300 second timeout), and returns a job id in under a second. The worker runs the agent and overwrites the job record with the answer or an error. The dashboard polls a `/chat-status` endpoint until the record is done. This removes the timeout ceiling entirely, and has run questions well over 90 seconds end to end in production. The remaining tradeoff is latency, not reliability: a hard multi-step question can take a minute or more to answer, which is a slow user experience even though it no longer fails.
+
+## Evaluation harness
+
+`scripts/eval_harness.py` grades the agent against a set of questions with known answers, so quality is measured instead of spot-checked by hand.
+
+Each case stores a trusted "golden" SQL query, not a frozen expected value. On every run the harness executes the golden SQL against live Athena to get the correct answer as of now, runs the agent on the same question, and checks whether the agent's answer contains the golden value. Because the golden is recomputed each run, the cases do not go stale as the daily pipeline adds rows.
+
+Cases sit in three tiers:
+- **auto**: the golden SQL is an independent, trusted reference. These count toward the headline score.
+- **auto_pending_data**: a temporary quarantine for cases whose golden shares a known data-quality blind spot with the agent, so a match would prove nothing. A case leaves this tier once the underlying data issue is fixed.
+- **manual**: the correct answer is a judgment call, so the agent's answer is dumped for a human to read.
+
+The harness has already earned its place: it surfaced two real bugs (a data-quality flag that missed a class of impossible prices, and a name-lookup failure), both since fixed, and each now has a regression case that fails if the bug returns. The set is currently about 10 cases and is being expanded.
 
 ## Guardrails
 
@@ -121,13 +148,21 @@ Two layers, and only one of them is the real defense.
 
 ## Dashboard and chat
 
-A single self-contained HTML file on S3, served through CloudFront with the bucket kept private. Four read endpoints behind API Gateway, all backed by one Lambda: top trades by day with date navigation, flagged anomalies with the explanation text pulled from the original filing, issuer search, and most active companies. The chat panel calls a second Lambda that wraps the agent.
+A single self-contained HTML file on S3, served through CloudFront with the bucket kept private. Read endpoints behind API Gateway, backed by one Lambda: top trades by day with date navigation, flagged anomalies with the explanation text pulled from the original filing, issuer search, and most active companies. The chat panel posts a question to the chat Lambda, gets back a job id, and polls `/chat-status` until the background worker has written the answer.
 
 ## Data quality findings
 
-**Rows with no transaction data.** A Form 4 has two sections, one for ordinary stock transactions and one for derivatives such as options, RSUs and DSUs. This pipeline parses only the first. When a filing holds nothing but derivative activity, a row is still written with the filing metadata and every trade field null. That is 8.1% of the table, unevenly spread: one issuer had 15 of its 18 rows in this state, so a naive count reported 18 transactions where 3 trades had actually occurred. Flagged with `is_empty_transaction` and excluded from aggregate counts. Parsing derivative transactions properly is a known gap, not yet built.
+**Rows with no transaction data.** A Form 4 has two sections, one for ordinary stock transactions and one for derivatives such as options, RSUs and DSUs. This pipeline parses only the first. When a filing holds nothing but derivative activity, a row is still written with the filing metadata and every trade field null. That is about 8% of the table, unevenly spread: one issuer had 15 of its 18 rows in this state, so a naive count reported 18 transactions where 3 trades had actually occurred. Flagged with `is_empty_transaction` and excluded from aggregate counts. Parsing derivative transactions properly is a known gap, not yet built.
 
-**Rows with a share count and no price.** 6.1% of the table. These are real transactions with no dollar value attached, such as gifts, awards, and some option exercises. Flagged with `has_no_price`, counted as transactions, and contributing nothing to dollar totals.  
+**Rows with a share count and no price.** About 6% of the table. These are real transactions with no dollar value attached, such as gifts, awards, and some option exercises. Flagged with `has_no_price`, counted as transactions, and contributing nothing to dollar totals.
+
+**Impossible per-share prices.** Some filings put a total value, a face amount, or another figure into the per-share price field, producing prices in the millions or billions per share. The earlier flags caught these only when the cause was identifiable (a bond name in the security title, or a specific transaction code). A plain common-stock row with a garbage price passed every check. `is_implausible_price` was added as a value sanity check: any per-share price above 1,000,000 is flagged, regardless of the instrument or code. This caught real errors the cause-based flags had missed, including an ordinary-shares purchase recorded at about $2.27 million per share and a sale recorded at about $2.11 million per share. The flag feeds `dollar_value_unreliable`, so these rows are excluded from dollar totals while still being kept and queryable.
+
+## Name-order entity resolution
+
+EDGAR stores every insider's name surname-first ("Ellis Emily"), but anyone asking about a person types the name in normal order ("Emily Ellis"). Matching a user's name against the stored name directly fails on the word order, so the agent would report "no record" for people who were in fact in the data.
+
+The fix is a normalized name column, `owner_name_search`, computed once in the staging model and carried into `fct_transactions`, `dim_owners`, and `agg_owner_activity`. It lowercases the name, replaces punctuation with spaces, splits into words, and sorts them, so "Ellis Emily" and "Emily Ellis" both become "ellis emily". Lookups match on the words in any order and tolerate extra tokens such as middle initials. When more than one person matches, that is surfaced and disambiguated by company rather than guessed. Fuzzy matching and matching across different CIKs were deliberately left out, to avoid false merges.
 
 ## Key decisions and why
 
@@ -145,16 +180,19 @@ A single self-contained HTML file on S3, served through CloudFront with the buck
 
 **Writing the agent loop by hand instead of using a framework.** The loop is short enough to write directly, and writing it directly means the token cost, the step limit, and the failure handling are all visible and adjustable. A framework would have hidden exactly the parts that turned out to need fixing.
 
+**Flagging by symptom as well as by cause.** The data-quality flags started out detecting known causes of bad values (a bond in the security title, a specific transaction code). The eval harness showed that this misses novel cases: a normal-looking equity row with an impossible price slipped through. Adding a value-based sanity check (`is_implausible_price`) alongside the cause-based flags catches the whole category, not just the causes already seen.
+
 ## Anomalies found in the data
 
-Large outliers in `dollar_value` were traced back to the original filings using the agent's own filing-fetch tool. Four have explanations:
+Large outliers in `dollar_value` were traced back to the original filings using the agent's own filing-fetch tool. Explanations found:
 
-- A bond reported through the stock fields, where the price was the total principal of a note issue (Angel Oak Financial Strategies Income Term Trust, about $1.6 quadrillion).
+- A bond reported through the stock fields, where the price was the total principal of a note issue (Angel Oak Financial Strategies Income Term Trust, about $1.6 quadrillion). Flagged as a debt security.
 - A debt-to-equity conversion, explained in the filing's own remarks field (InnSuites Hospitality Trust, about $5.49 trillion).
 - A bond redemption where the shares field held the dollar face value of the redeemed notes (DNP Select Income Fund, about $1.1 quadrillion).
-- A purchase at $180,000 per share that is genuinely in the raw filing with no remarks or footnotes anywhere (Reborn Coffee). No explanation found. Left flagged and open rather than quietly corrected.
+- Two ordinary-equity rows with impossible per-share prices and no debt or special-code cause: an ordinary-shares purchase at about $2.27 million per share (SL Science Holding) and a sale at about $2.11 million per share (Phillips 66). These passed the cause-based flags and are what motivated the `is_implausible_price` check.
+- A purchase at $180,000 per share that is genuinely in the raw filing with no remarks or footnotes anywhere (Reborn Coffee). No explanation found, and below the implausible-price threshold, so it is left flagged through its filing and open rather than quietly corrected.
 
-One more, a second InnSuites sale at $22,593.60 per share, is still untraced.
+One more, a second InnSuites sale at about $22,593.60 per share, is still untraced.
 
 ## Cost
 
@@ -162,16 +200,16 @@ Built to stay inside AWS's free tier. S3, Lambda, Step Functions, and EventBridg
 
 ## Current status
 
-The pipeline (ingest, parse, model, orchestrate, schedule) is built and running on its own every day. The dashboard and the agent are built and deployed, and the site is public. Row counts have been checked and are consistent, with no gaps, as of the last verified run.
+The pipeline (ingest, parse, model, orchestrate, schedule) is built and running on its own every day. The dashboard and the agent are built and deployed, the chat runs as an async background job, and the site is public. An evaluation harness grades the agent against known answers. Row counts have been checked and are consistent, with no gaps, as of the last verified run.
 
 **Known limitations:**
 
-- The chat is not reliable in production. The agent itself works and gives accurate answers, but API Gateway's HTTP API has a fixed 30 second timeout that cannot be raised, and inference latency on the model provider's free tier swings between 4 and 25 seconds per call with no warning. A multi-step question needs several calls, so on a slow day every request exceeds the ceiling. Trimming query results, cutting the step limit from 8 to 4, and moving to a smaller model all helped and none of them fix it. The right fix is to run the agent as a background job and have the browser poll for the result, which removes the ceiling entirely. Not built yet.
-- No evaluation harness. There is no test set of questions with known answers, so answer quality is checked by querying Athena by hand and comparing. That caught several real errors, but it does not scale.
+- The agent can be slow. The async job queue removed the hard timeout failure, but a hard multi-step question can still take a minute or more to answer on the free-tier model, which is a slow user experience.
 - The agent has no memory between questions.
 - Derivative transactions are not parsed, which is what produces the empty rows described above.
-- No matching of similar names or entities across different CIKs.
+- No matching of similar names or entities across different CIKs. (Name-order within a single person's name is handled; linking two different CIKs that may be the same person is not.)
+- The eval set is small (about 10 cases) and being expanded.
 
 ## A note on how this was built
 
-Every part described here, the parsing logic, the orchestration design, the agent loop, and every fix listed above, was built from scratch for this project. The overall patterns used (layered storage, star-schema style modeling, an agent that calls tools) are common patterns in the field, not something invented here. What is original is applying them to this real, messy, publicly available dataset.
+Every part described here, the parsing logic, the orchestration design, the agent loop, the data-quality flags, the name-resolution column, the eval harness, and every fix listed above, was built from scratch for this project. The overall patterns used (layered storage, star-schema style modeling, an agent that calls tools) are common patterns in the field, not something invented here. What is original is applying them to this real, messy, publicly available dataset.

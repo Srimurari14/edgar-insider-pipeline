@@ -3,6 +3,7 @@
 SELECT 
     f.owner_cik,
     d.owner_name,
+    d.owner_name_search,
     max(transaction_date) as last_transaction_date,
     SUM(CASE WHEN transaction_classification = 'Buy' AND dollar_value_unreliable = false 
         THEN dollar_value ELSE 0 END) AS total_buy_value,
@@ -19,4 +20,4 @@ FROM
 JOIN 
     {{ref('dim_owners')}} d
 ON f.owner_cik = d.owner_cik
-GROUP BY 1,2
+GROUP BY 1,2,3

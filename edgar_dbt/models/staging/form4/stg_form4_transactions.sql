@@ -8,6 +8,16 @@ SELECT
     issuer_trading_symbol,
     owner_cik,
     owner_name, 
+    array_join(
+      array_sort(
+        split(
+          regexp_replace(
+            regexp_replace(lower(owner_name), '[-.,'']', ' '),
+            '\s+', ' '
+          ),
+        ' ')
+      ),
+    ' ') AS owner_name_search,
     is_director,
     is_officer, 
     is_ten_percent_owner,

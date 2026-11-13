@@ -10,6 +10,7 @@ SELECT
     issuer_trading_symbol,
     owner_cik,
     owner_name, 
+    owner_name_search,
     is_director,
     is_officer, 
     is_ten_percent_owner,
@@ -41,9 +42,14 @@ SELECT
         ELSE false 
     END AS is_nonstandard_pricing,
     CASE 
+        WHEN transaction_price_per_share > 1000000
+        THEN true ELSE false
+    END AS is_implausible_price,
+    CASE 
         WHEN security_title LIKE '%Notes%' OR security_title LIKE '%Bond%' 
             OR security_title LIKE '%Debenture%' OR REGEXP_LIKE(security_title, '[0-9]+\.[0-9]+%')
             OR transaction_code = 'J'
+            OR transaction_price_per_share > 1000000
         THEN true ELSE false
     END AS dollar_value_unreliable,
     CASE 
